@@ -23,25 +23,6 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-/**
- * Interactive UTC Timezones — React + Leaflet (no react-leaflet)
- *
- * GEOJSON SAFETY
- * - Fetch Natural Earth timezones as TopoJSON → convert to GeoJSON.
- * - VALIDATE & SANITIZE into a proper FeatureCollection before rendering.
- * - If anything fails, KEEP SHOWING a small built‑in fallback polygon so the map always renders.
- *
- * UX
- * - Boxed layout. Zones are transparent until clicked. Clicking colors the zone.
- * - Paste crypto addresses (lightweight EVM 0x... / rough Solana base58 only).
- * - Clicking a zone appends a row to the table. Clicking the same zone again
- *   toggles it OFF and removes the most recent row for that zone (LIFO).
- * - Multiple zones can stay selected.
- *
- * No Web3/MetaMask calls. Pure UI.
- */
-
-// ---------- Pure helpers (reused in tests) ----------
 const getZoneName = (props = {}) => props.tzid || props.TZID || props.time_zone || props.NAME || props.name || 'Timezone';
 const isEvm = (s) => /^(0x)[0-9a-fA-F]{40}$/.test(s);
 const isSol = (s) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s); // rough base58
@@ -59,8 +40,8 @@ const pastelFromLabel = (label) => {
   let h = 0;
   const s = String(label || '');
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  const hue = h %% 360;
-  return `hsl(${hue} 85%% 70%%)`;
+  const hue = h % 360;
+  return `hsl(${hue} 85% 70%)`;
 };
 
 const isFeatureCollection = (obj) => !!obj && obj.type === 'FeatureCollection' && Array.isArray(obj.features);
@@ -334,17 +315,17 @@ function TimezoneMapUI() {
     <div style={{ maxWidth: 1100, margin: '0 auto', padding: 16, fontFamily: 'Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial', color: '#e8ecff' }}>
       <style>{`
         :root { --card: rgba(255,255,255,0.06); --stroke: rgba(255,255,255,0.12); --text: #e8ecff; --muted:#aab4d6; }
-        .fancy-bg { position: fixed; inset: -20vmax; z-index: -1; background: radial-gradient(60vmax 60vmax at 20%% 10%%, #2b5cff22, transparent), radial-gradient(50vmax 50vmax at 80%% 30%%, #00ffd522, transparent), radial-gradient(40vmax 40vmax at 50%% 90%%, #ff66cc22, transparent); filter: blur(40px); animation: float 16s ease-in-out infinite alternate; }
+        .fancy-bg { position: fixed; inset: -20vmax; z-index: -1; background: radial-gradient(60vmax 60vmax at 20% 10%, #2b5cff22, transparent), radial-gradient(50vmax 50vmax at 80% 30%, #00ffd522, transparent), radial-gradient(40vmax 40vmax at 50% 90%, #ff66cc22, transparent); filter: blur(40px); animation: float 16s ease-in-out infinite alternate; }
         @keyframes float { from { transform: translateY(-8px);} to { transform: translateY(8px);} }
         .card { background: var(--card); border: 1px solid var(--stroke); border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.35); backdrop-filter: blur(8px); }
         .btn { border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 700; transition: transform .12s ease, box-shadow .2s ease; }
         .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,0,0,.25); }
         .btn-primary { background: linear-gradient(135deg,#5c7cfa,#4dabf7); color: white; }
         .btn-plain { background: #0b1020; color: var(--text); border: 1px solid var(--stroke); }
-        .textarea { width: 100%%; height: 140px; background: #081225; color: var(--text); border: 1px solid var(--stroke); border-radius: 12px; padding: 12px; }
+        .textarea { width: 100%; height: 140px; background: #081225; color: var(--text); border: 1px solid var(--stroke); border-radius: 12px; padding: 12px; }
         .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; border: 1px solid var(--stroke); background: rgba(255,255,255,.05); font-size:12px; }
         .pill button { background: transparent; border: 0; color: #ffffffcc; cursor: pointer; border-radius: 999px; padding: 0 6px; }
-        .table { width: 100%%; border-collapse: collapse; font-size: 13px; color: var(--text); }
+        .table { width: 100%; border-collapse: collapse; font-size: 13px; color: var(--text); }
         .th, .td { padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,.08); }
         .thead { position: sticky; top: 0; background: #0f1424; z-index: 1; }
       `}</style>
