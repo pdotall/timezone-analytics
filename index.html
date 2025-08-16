@@ -113,14 +113,34 @@
         ],
       };
 
-      // IANA-like offset label (best-effort in frontend-only mode we just show UTC±hh from our detection)
-      const offsetToLabel = (h) => `UTC${h >= 0 ? '+' : ''}${String(h).padStart(h < 0 ? 0 : 0, '0')}`;
+      // Canonicalize any zone label (e.g. "UTC−05:00", "GMT-05", "UTC+5:30") → "UTC-5" or "UTC+5:30"
+      function canonicalUtc(label) {
+        if (!label) return '';
+        let s = String(label).trim();
+        s = s.replace(/^GMT/i, 'UTC');        // GMT → UTC
+        s = s.replace(/\u2212/g, '-');        // unicode minus → hyphen-minus
+        // Accept "UTC+05:00", "UTC-5", "UTC +05", "+5:30", "-03:00", etc.
+        const m = s.match(/([Uu][Tt][Cc])?\s*([+-]?)(\d{1,2})(?::?(\d{2}))?/);
+        if (!m) return s.startsWith('UTC') ? s : `UTC${s.startsWith('+')||s.startsWith('-') ? '' : '+'}${s}`;
+        const sign = m[2] || '+';
+        const hh = Math.min(14, Math.max(0, parseInt(m[3], 10)));
+        const mm = m[4] ? parseInt(m[4], 10) : 0;
+        let hSigned = sign === '-' ? -hh : hh;
+        if (mm && mm !== 0) {
+          const mmStr = String(Math.min(59, Math.max(0, mm))).padStart(2, '0');
+          return `UTC${hSigned >= 0 ? '+' : ''}${hSigned}:${mmStr}`;
+        }
+        return `UTC${hSigned >= 0 ? '+' : ''}${hSigned}`;
+      }
+
+      // IANA-like offset label from integer hour
+      const offsetToLabel = (h) => `UTC${h >= 0 ? '+' : ''}${h}`;
 
       /* =========================================================
          TIMEZONE DETECTION (Frontend-only using SIM)
          ========================================================= */
 
-      // Analyze a 24-length histogram into best UTC offset (same logic as your server)
+      // Analyze a 24-length histogram into best UTC offset (same logic as server)
       function analyzeHourlyCounts(counts) {
         const total = counts.reduce((a, b) => a + b, 0);
         const sorted = [...counts].sort((a, b) => a - b);
@@ -153,7 +173,7 @@
         };
       }
 
-      // Try to discover all supported chains from SIM. If it fails, use a big built-in set.
+      // Try to discover all supported chains from SIM. If it fails, use a broad built-in set.
       async function getAllChainIds() {
         try {
           const r = await fetch(`${SIM_BASE}/chains`);
@@ -166,7 +186,6 @@
             if (uniq.length) return uniq;
           }
         } catch {}
-        // Fallback list (broad coverage; you can add more if needed)
         return [
           1, 10, 25, 40, 56, 57, 100, 122, 137, 169, 204, 250, 288, 324, 336, 360, 369, 534, 570, 595, 616, 7700, 8217,
           8453, 9001, 10000, 1030, 1088, 1101, 1284, 1285, 2000, 2222, 4689, 5000, 59140, 59144, 71401, 81457, 42161,
@@ -174,11 +193,9 @@
         ];
       }
 
-      // Fetch recent activity for a single address across ALL chains (no limit param → SIM default)
+      // Fetch recent activity for a single address across ALL chains (SIM defaults limits)
       async function fetchAddressHourlyCounts(address, chainIds) {
         const counts = new Array(24).fill(0);
-
-        // Avoid hammering: do small concurrency batches
         const CONCURRENCY = 6;
         let idx = 0;
 
@@ -189,7 +206,7 @@
               `${SIM_BASE}/evm/activity/${address}`
               + `?chain_ids=${chainId}`
               + `&type=send,receive,mint,burn`
-              + `&sort_by=block_time&sort_order=asc`; // intentionally no &limit to let SIM default
+              + `&sort_by=block_time&sort_order=asc`;
             try {
               const r = await fetch(url);
               if (!r.ok) continue;
@@ -200,9 +217,7 @@
                 const h = new Date(t).getUTCHours();
                 counts[h] += 1;
               }
-            } catch {
-              // ignore this chain if it errors; continue
-            }
+            } catch { /* ignore chain errors */ }
           }
         }
         await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chainIds.length) }, () => worker()));
@@ -245,7 +260,7 @@
         const mapRef = useRef(null);
         const tzLayerRef = useRef(null);
 
-        const [selectedZones, setSelectedZones] = useState([]); // array of labels
+        const [selectedZones, setSelectedZones] = useState([]); // canonical labels
         const selectedZonesRef = useRef(selectedZones);
         useEffect(() => { selectedZonesRef.current = selectedZones; }, [selectedZones]);
 
@@ -256,7 +271,7 @@
         const [loading, setLoading] = useState(false);
         const [detecting, setDetecting] = useState(false);
         const [detectError, setDetectError] = useState('');
-        const [zoneAddresses, setZoneAddresses] = useState({});
+        const [zoneAddresses, setZoneAddresses] = useState({}); // key = canonical label
         const zoneAddressesRef = useRef(zoneAddresses);
         useEffect(() => { zoneAddressesRef.current = zoneAddresses; }, [zoneAddresses]);
 
@@ -346,16 +361,23 @@
           if (!tzLayerRef.current) return;
           try {
             tzLayerRef.current.eachLayer((layer) => {
-              const feature = layer.feature || {}; const label = getZoneName(feature.properties || {});
-              const selected = selectedZones.includes(label);
+              const feature = layer.feature || {};
+              const original = getZoneName(feature.properties || {});
+              const canon = canonicalUtc(original);
+              const selected = selectedZones.includes(canon);
+              const color = pastelFromLabel(canon);
+
               layer.setStyle({
-                fillColor: selected ? pastelFromLabel(label) : 'transparent',
+                fillColor: selected ? color : 'transparent',
                 fillOpacity: selected ? 0.6 : 0,
-                color: selected ? pastelFromLabel(label) : '#6072a6',
+                color: selected ? color : '#6072a6',
                 weight: selected ? 2 : 1,
               });
-              const count = zoneAddressesRef.current[label]?.length || 0;
-              layer.bindTooltip(`${label} · ${count}`, { sticky: true, direction: 'top' });
+
+              const count = zoneAddressesRef.current[canon]?.length || 0;
+              layer.bindTooltip(`${canon} · ${count}${original && original !== canon ? ` (${original})` : ''}`, {
+                sticky: true, direction: 'top'
+              });
             });
           } catch {}
         }, [selectedZones]);
@@ -372,9 +394,10 @@
           }
 
           const style = (feature) => {
-            const label = getZoneName(feature?.properties || {});
-            const selected = selectedZonesRef.current.includes(label);
-            const color = pastelFromLabel(label);
+            const original = getZoneName(feature?.properties || {});
+            const canon = canonicalUtc(original);
+            const selected = selectedZonesRef.current.includes(canon);
+            const color = pastelFromLabel(canon);
             return {
               color: selected ? color : '#6072a6',
               weight: selected ? 2 : 1,
@@ -384,20 +407,23 @@
           };
 
           const onEachFeature = (feature, layer) => {
-            const label = getZoneName(feature?.properties || {});
-            const count = zoneAddressesRef.current[label]?.length || 0;
-            layer.bindTooltip(`${label} · ${count}`, { sticky: true, direction: 'top' });
+            const original = getZoneName(feature?.properties || {});
+            const canon = canonicalUtc(original);
+            const count = zoneAddressesRef.current[canon]?.length || 0;
+            layer.bindTooltip(`${canon} · ${count}${original && original !== canon ? ` (${original})` : ''}`, {
+              sticky: true, direction: 'top'
+            });
             layer.on('click', () => {
               setSelectedZones((prev) => {
-                const already = prev.includes(label);
+                const already = prev.includes(canon);
                 setRows((prevRows) =>
-                  toggleRowsLifo(prevRows, label, {
-                    addressCount: zoneAddressesRef.current[label]?.length || 0,
-                    sample: (zoneAddressesRef.current[label] || []).join(' | '),
+                  toggleRowsLifo(prevRows, canon, {
+                    addressCount: zoneAddressesRef.current[canon]?.length || 0,
+                    sample: (zoneAddressesRef.current[canon] || []).join(' | '),
                     source: 'ne',
                   }).rows
                 );
-                return already ? prev.filter((z) => z !== label) : [label, ...prev];
+                return already ? prev.filter((z) => z !== canon) : [canon, ...prev];
               });
               try { if (layer.getBounds) mapRef.current.fitBounds(layer.getBounds(), { padding: [20, 20] }); } catch {}
             });
@@ -412,10 +438,11 @@
           setDetectError('');
           try {
             const res = await detectTimezones(addrList);
-            // Group addresses by detected utc_label
+            // Group addresses by detected utc_label (canonicalized)
             const zoneMap = {};
             for (const r of Array.isArray(res) ? res : []) {
-              const z = r.utc_label || r.tzid || r.zone || r.utc_zone || offsetToLabel(r.utc_offset_hours || 0);
+              const zRaw = r.utc_label || r.tzid || r.zone || r.utc_zone || offsetToLabel(r.utc_offset_hours || 0);
+              const z = canonicalUtc(zRaw);
               if (!z) continue;
               (zoneMap[z] = zoneMap[z] || []).push(r.address);
             }
@@ -465,7 +492,7 @@
               .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,0,0,.25); }
               .btn-primary { background: linear-gradient(135deg,#5c7cfa,#4dabf7); color: white; }
               .btn-plain { background: #0b1020; color: var(--text); border: 1px solid var(--stroke); }
-              .textarea { width: 100%; height: 140px; background: #081225; color: var(--text);
+              .textarea { width: 100%; height: 140px; background: #081225; color: #e8ecff;
                 border: 1px solid var(--stroke); border-radius: 12px; padding: 12px; }
               .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px;
                 border: 1px solid var(--stroke); background: rgba(255,255,255,.05); font-size:12px; }
