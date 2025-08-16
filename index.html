@@ -47,10 +47,17 @@
       };
 
       // -------- FIX: choose the correct API base during dev vs prod --------
+      // Always talk to the Node API on :3001.
+// If you’re truly using a different port, change API_PORT.
+      const API_PORT = 3001;
+      const host = location.hostname;
+
+// localhost → http://localhost:3001
+// anything else (Codespaces, LAN IP, custom domain) → same host + :3001
       const API_BASE =
-        (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
-          ? 'http://localhost:3001'
-          : '';
+      (host === 'localhost' || host === '127.0.0.1')
+          ? `http://${host}:${API_PORT}`
+          : `${location.protocol}//${host}:${API_PORT}`;
 
       async function detectTimezones(addresses = []) {
         const r = await fetch(`${API_BASE}/api/timezone`, {
