@@ -2,9 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <title>UTC Timezones — SIM (Frontend-Only)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>UTC Timezones — Demo</title>
-    <meta name="description" content="Interactive UTC timezones with real polygons." />
+    <meta name="description" content="Interactive UTC timezones with real polygons — frontend only using Dune SIM proxy." />
     <style>
       html, body { margin: 0; height: 100%; background: #0b1020; }
       #root { min-height: 100vh; }
@@ -19,14 +19,23 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <script type="text/babel">
-      // Use React globals from the CDN (no imports/exports in this inline script)
       const { useEffect, useRef, useState } = React;
 
-      // === Component code (same as src/TimezoneMapUI.jsx) ===
+      /* =========================================================
+         CONFIG — point this to your Cloudflare Worker SIM proxy
+         (It should add the SIM API key and CORS: *)
+         ========================================================= */
+      const SIM_BASE = 'https://smart-money.pdotcapital.workers.dev/v1';
 
-      const getZoneName = (props = {}) => props.tzid || props.TZID || props.time_zone || props.NAME || props.name || 'Timezone';
+      /* =========================================================
+         HELPERS
+         ========================================================= */
+      const getZoneName = (props = {}) =>
+        props.tzid || props.TZID || props.time_zone || props.NAME || props.name || 'Timezone';
+
       const isEvm = (s) => /^(0x)[0-9a-fA-F]{40}$/.test(s);
       const isSol = (s) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s); // rough base58
+
       const parseAddresses = (text) => {
         const parts = String(text || '')
           .split(/[\s,;\n\r]+/)
@@ -46,30 +55,6 @@
         return out;
       };
 
-      // -------- FIX: choose the correct API base during dev vs prod --------
-      // Always talk to the Node API on :3001.
-// If you’re truly using a different port, change API_PORT.
-      const API_PORT = 3001;
-      const host = location.hostname;
-
-// localhost → http://localhost:3001
-// anything else (Codespaces, LAN IP, custom domain) → same host + :3001
-      const API_BASE =
-      (host === 'localhost' || host === '127.0.0.1')
-          ? `http://${host}:${API_PORT}`
-          : `${location.protocol}//${host}:${API_PORT}`;
-
-      async function detectTimezones(addresses = []) {
-        const r = await fetch(`${API_BASE}/api/timezone`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ addresses }),
-        });
-        if (!r.ok) throw new Error(`API HTTP ${r.status}`);
-        return r.json();
-      }
-
-      // Pretty color per zone label
       const pastelFromLabel = (label) => {
         let h = 0;
         const s = String(label || '');
@@ -80,7 +65,7 @@
 
       const isFeatureCollection = (obj) => !!obj && obj.type === 'FeatureCollection' && Array.isArray(obj.features);
 
-      // Validate/sanitize geometries (Polygon/MultiPolygon only)
+      // Geometry validators
       const isNumber = (x) => typeof x === 'number' && Number.isFinite(x);
       const isPosition = (p) => Array.isArray(p) && p.length >= 2 && isNumber(p[0]) && isNumber(p[1]);
       const isLinearRing = (ring) => Array.isArray(ring) && ring.length >= 4 && ring.every(isPosition);
@@ -95,11 +80,8 @@
             if (!feat || typeof feat !== 'object') continue;
             const g = feat.geometry;
             if (!g || typeof g !== 'object') continue;
-            if (g.type === 'Polygon' && isPolygon(g.coordinates)) {
-              out.features.push(feat);
-            } else if (g.type === 'MultiPolygon' && isMultiPolygon(g.coordinates)) {
-              out.features.push(feat);
-            }
+            if (g.type === 'Polygon' && isPolygon(g.coordinates)) out.features.push(feat);
+            else if (g.type === 'MultiPolygon' && isMultiPolygon(g.coordinates)) out.features.push(feat);
           }
           return out.features.length ? out : null;
         } catch {
@@ -109,7 +91,7 @@
 
       // Add/Toggle rows (LIFO remove for same zone)
       const toggleRowsLifo = (prevRows, zoneLabel, { addressCount, sample, source }) => {
-        const idx = prevRows.findIndex((r) => r.zone === zoneLabel); // most recent at 0
+        const idx = prevRows.findIndex((r) => r.zone === zoneLabel);
         if (idx === 0) return { rows: prevRows.slice(1), toggledOff: true };
         if (idx > 0)  return { rows: [...prevRows.slice(0, idx), ...prevRows.slice(idx + 1)], toggledOff: true };
         const ts = new Date().toISOString();
@@ -119,21 +101,145 @@
         };
       };
 
-      // Fallback FC (so the map always has valid data)
+      // Fallback FC to keep the map valid if data fails
       const FALLBACK_FC = {
         type: 'FeatureCollection',
         features: [
           {
             type: 'Feature',
-            properties: { tzid: 'UTC+0 (fallback)' },
-            geometry: {
-              type: 'Polygon',
-              coordinates: [[[-5, 45], [5, 45], [5, 35], [-5, 35], [-5, 45]]],
-            },
+            properties: { tzid: 'UTC (fallback)' },
+            geometry: { type: 'Polygon', coordinates: [[[-5, 45], [5, 45], [5, 35], [-5, 35], [-5, 45]]] },
           },
         ],
       };
 
+      // IANA-like offset label (best-effort in frontend-only mode we just show UTC±hh from our detection)
+      const offsetToLabel = (h) => `UTC${h >= 0 ? '+' : ''}${String(h).padStart(h < 0 ? 0 : 0, '0')}`;
+
+      /* =========================================================
+         TIMEZONE DETECTION (Frontend-only using SIM)
+         ========================================================= */
+
+      // Analyze a 24-length histogram into best UTC offset (same logic as your server)
+      function analyzeHourlyCounts(counts) {
+        const total = counts.reduce((a, b) => a + b, 0);
+        const sorted = [...counts].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+
+        let bestOffset = 0;
+        let bestScore = -Infinity;
+        for (let offset = -12; offset <= 14; offset++) {
+          let daySum = 0;
+          for (let i = 0; i < 24; i++) {
+            const localHour = (i + offset + 24) % 24;
+            if (localHour >= 8 && localHour < 18) daySum += counts[i];
+          }
+          if (daySum > bestScore) {
+            bestScore = daySum;
+            bestOffset = offset;
+          }
+        }
+        const utc_label = `UTC${bestOffset >= 0 ? '+' : ''}${bestOffset}`;
+        const ratio = total ? bestScore / total : 0;
+        const highBars = counts.filter((c) => c >= median * 3).length;
+
+        return {
+          utc_offset_hours: bestOffset,
+          utc_label,
+          median,
+          ratio,
+          bars_high_over_mult: highBars,
+          passes_rule: ratio > 0.5 && highBars >= 3
+        };
+      }
+
+      // Try to discover all supported chains from SIM. If it fails, use a big built-in set.
+      async function getAllChainIds() {
+        try {
+          const r = await fetch(`${SIM_BASE}/chains`);
+          if (r.ok) {
+            const js = await r.json();
+            const ids = (js?.chains || js || [])
+              .map((c) => Number(c.chain_id ?? c.id))
+              .filter((n) => Number.isFinite(n));
+            const uniq = Array.from(new Set(ids)).sort((a, b) => a - b);
+            if (uniq.length) return uniq;
+          }
+        } catch {}
+        // Fallback list (broad coverage; you can add more if needed)
+        return [
+          1, 10, 25, 40, 56, 57, 100, 122, 137, 169, 204, 250, 288, 324, 336, 360, 369, 534, 570, 595, 616, 7700, 8217,
+          8453, 9001, 10000, 1030, 1088, 1101, 1284, 1285, 2000, 2222, 4689, 5000, 59140, 59144, 71401, 81457, 42161,
+          42170, 42220, 43114, 47805, 50001, 53935
+        ];
+      }
+
+      // Fetch recent activity for a single address across ALL chains (no limit param → SIM default)
+      async function fetchAddressHourlyCounts(address, chainIds) {
+        const counts = new Array(24).fill(0);
+
+        // Avoid hammering: do small concurrency batches
+        const CONCURRENCY = 6;
+        let idx = 0;
+
+        async function worker() {
+          while (idx < chainIds.length) {
+            const chainId = chainIds[idx++];
+            const url =
+              `${SIM_BASE}/evm/activity/${address}`
+              + `?chain_ids=${chainId}`
+              + `&type=send,receive,mint,burn`
+              + `&sort_by=block_time&sort_order=asc`; // intentionally no &limit to let SIM default
+            try {
+              const r = await fetch(url);
+              if (!r.ok) continue;
+              const { activity = [] } = await r.json();
+              for (const ev of activity) {
+                const t = Date.parse(ev.block_time);
+                if (!Number.isFinite(t)) continue;
+                const h = new Date(t).getUTCHours();
+                counts[h] += 1;
+              }
+            } catch {
+              // ignore this chain if it errors; continue
+            }
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(CONCURRENCY, chainIds.length) }, () => worker()));
+        return counts;
+      }
+
+      // Map with concurrency utility
+      async function mapWithConcurrency(items, limit, fn) {
+        const results = new Array(items.length);
+        let i = 0;
+        const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+          while (i < items.length) {
+            const idx = i++;
+            try {
+              results[idx] = await fn(items[idx], idx);
+            } catch (e) {
+              results[idx] = { error: e?.message || String(e) };
+            }
+          }
+        });
+        await Promise.all(workers);
+        return results;
+      }
+
+      // Main detector (frontend-only)
+      async function detectTimezones(addresses = []) {
+        const chainIds = await getAllChainIds();
+        const perAddress = await mapWithConcurrency(addresses, 4, async (addr) => {
+          const counts = await fetchAddressHourlyCounts(addr, chainIds);
+          return { address: addr, counts, ...analyzeHourlyCounts(counts) };
+        });
+        return perAddress;
+      }
+
+      /* =========================================================
+         UI COMPONENT
+         ========================================================= */
       function TimezoneMapUI() {
         const mapEl = useRef(null);
         const mapRef = useRef(null);
@@ -148,7 +254,6 @@
         const [rows, setRows] = useState([]);
         const [status, setStatus] = useState('');
         const [loading, setLoading] = useState(false);
-        const [testResults, setTestResults] = useState(null);
         const [detecting, setDetecting] = useState(false);
         const [detectError, setDetectError] = useState('');
         const [zoneAddresses, setZoneAddresses] = useState({});
@@ -156,11 +261,12 @@
         useEffect(() => { zoneAddressesRef.current = zoneAddresses; }, [zoneAddresses]);
 
         // Natural Earth TopoJSON → convert to GeoJSON in-browser
-        const TOPO_URL = 'https://gist.githubusercontent.com/tschaub/cc70281ce4df5358eac38b34409b9ef9/raw/d152ba9e83d7733d9fb5f37f52202c0fcead834a/timezones.json';
+        const TOPO_URL =
+          'https://gist.githubusercontent.com/tschaub/cc70281ce4df5358eac38b34409b9ef9/raw/d152ba9e83d7733d9fb5f37f52202c0fcead834a/timezones.json';
 
-        const [geoData, setGeoData] = useState(FALLBACK_FC); // start with fallback
+        const [geoData, setGeoData] = useState(FALLBACK_FC);
 
-        // --- External loaders ---
+        // External loaders
         const loadScript = (src) => new Promise((resolve, reject) => {
           const existing = document.querySelector(`script[src="${src}"]`);
           if (existing) {
@@ -180,7 +286,7 @@
           l.onload = resolve; l.onerror = reject; document.head.appendChild(l);
         });
 
-        // --- Map init ---
+        // Map init
         useEffect(() => {
           let cancelled = false;
           (async () => {
@@ -189,14 +295,39 @@
               await loadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js');
               if (cancelled) return;
               const L = window.L; if (!L) throw new Error('Leaflet failed to load');
+
               mapRef.current = L.map(mapEl.current, { minZoom: 1.5, worldCopyJump: true, zoomSnap: 0.25, zoomDelta: 0.25 })
                 .setView([20, 0], 2.2);
               L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { opacity: 0.5, attribution: '&copy; OSM' }).addTo(mapRef.current);
-              // First data load
-              await loadZones();
+
+              // Load timezones (TopoJSON → GeoJSON)
+              setLoading(true);
+              try {
+                await loadScript('https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js');
+                const r = await fetch(TOPO_URL, { cache: 'reload' });
+                if (!r.ok) throw new Error(`Failed to fetch TopoJSON (HTTP ${r.status})`);
+                const topo = await r.json();
+                const objects = topo && topo.objects ? topo.objects : {};
+                const keys = Object.keys(objects);
+                if (!keys.length) throw new Error('Invalid TopoJSON: no objects');
+                const bestKey = keys.find((k) => /time/i.test(k)) || keys[0];
+                const fc = window.topojson.feature(topo, objects[bestKey]);
+                const sanitized = sanitizeFeatureCollection(fc);
+                if (!sanitized) throw new Error('Converted data is not a valid FeatureCollection');
+                setGeoData(sanitized);
+                setStatus(`Loaded ${sanitized.features?.length ?? 0} zones.`);
+              } catch (err) {
+                console.error(err);
+                setGeoData(FALLBACK_FC);
+                setStatus(`Error loading timezones — showing fallback`);
+              } finally {
+                setLoading(false);
+              }
+
               // Render initial layer
               renderZones();
-              // Clear selection if click on empty map
+
+              // Clear selection if clicking empty map
               mapRef.current.on('click', (e) => {
                 if (!e.originalEvent.target.closest?.('.leaflet-interactive')) setSelectedZones([]);
               });
@@ -205,11 +336,12 @@
               setStatus(err.message || String(err));
             }
           })();
+
           return () => { cancelled = true; try { mapRef.current?.remove(); } catch {} };
           // eslint-disable-next-line react-hooks/exhaustive-deps
         }, []);
 
-        // Re-style polygons whenever selection changes
+        // Re-style polygons when selection changes
         useEffect(() => {
           if (!tzLayerRef.current) return;
           try {
@@ -222,10 +354,8 @@
                 color: selected ? pastelFromLabel(label) : '#6072a6',
                 weight: selected ? 2 : 1,
               });
-              layer.bindTooltip(
-                `${label} · ${(zoneAddressesRef.current[label] || []).length}`,
-                { sticky: true, direction: 'top' }
-              );
+              const count = zoneAddressesRef.current[label]?.length || 0;
+              layer.bindTooltip(`${label} · ${count}`, { sticky: true, direction: 'top' });
             });
           } catch {}
         }, [selectedZones]);
@@ -233,50 +363,30 @@
         // Re-render polygons when geoData changes
         useEffect(() => { if (mapRef.current) renderZones(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [geoData]);
 
-        // Load zones (TopoJSON → FC → sanitize)
-        async function loadZones() {
-          setLoading(true);
-          try {
-            await loadScript('https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js');
-            const r = await fetch(TOPO_URL, { cache: 'reload' });
-            if (!r.ok) throw new Error(`Failed to fetch TopoJSON (HTTP ${r.status})`);
-            const topo = await r.json();
-            const objects = topo && topo.objects ? topo.objects : {};
-            const keys = Object.keys(objects);
-            if (!keys.length) throw new Error('Invalid TopoJSON: no objects');
-            const bestKey = keys.find((k) => /time/i.test(k)) || keys[0];
-            const fc = window.topojson.feature(topo, objects[bestKey]);
-            const sanitized = sanitizeFeatureCollection(fc);
-            if (!sanitized) throw new Error('Converted data is not a valid FeatureCollection');
-            setGeoData(sanitized);
-            setStatus(`Loaded ${sanitized.features?.length ?? 0} zones.`);
-          } catch (err) {
-            console.error(err);
-            setGeoData(FALLBACK_FC); // keep fallback
-            setStatus(`Error loading timezones — showing fallback: ${err.message || String(err)}`);
-          } finally {
-            setLoading(false);
-          }
-        }
-
         function renderZones() {
           const L = window.L; if (!L || !mapRef.current || !geoData) return;
-          // Remove old layer
+
           if (tzLayerRef.current) {
             try { tzLayerRef.current.remove(); } catch {}
             tzLayerRef.current = null;
           }
-          const defaultStyle = (feature) => {
+
+          const style = (feature) => {
             const label = getZoneName(feature?.properties || {});
             const selected = selectedZonesRef.current.includes(label);
-            return { color: selected ? pastelFromLabel(label) : '#6072a6', weight: selected ? 2 : 1, fillColor: selected ? pastelFromLabel(label) : 'transparent', fillOpacity: selected ? 0.6 : 0 };
+            const color = pastelFromLabel(label);
+            return {
+              color: selected ? color : '#6072a6',
+              weight: selected ? 2 : 1,
+              fillColor: selected ? color : 'transparent',
+              fillOpacity: selected ? 0.6 : 0,
+            };
           };
+
           const onEachFeature = (feature, layer) => {
             const label = getZoneName(feature?.properties || {});
-            layer.bindTooltip(
-              `${label} · ${(zoneAddressesRef.current[label] || []).length}`,
-              { sticky: true, direction: 'top' }
-            );
+            const count = zoneAddressesRef.current[label]?.length || 0;
+            layer.bindTooltip(`${label} · ${count}`, { sticky: true, direction: 'top' });
             layer.on('click', () => {
               setSelectedZones((prev) => {
                 const already = prev.includes(label);
@@ -289,11 +399,11 @@
                 );
                 return already ? prev.filter((z) => z !== label) : [label, ...prev];
               });
-              // Fit bounds
               try { if (layer.getBounds) mapRef.current.fitBounds(layer.getBounds(), { padding: [20, 20] }); } catch {}
             });
           };
-          tzLayerRef.current = L.geoJSON(geoData, { style: defaultStyle, onEachFeature }).addTo(mapRef.current);
+
+          tzLayerRef.current = L.geoJSON(geoData, { style, onEachFeature }).addTo(mapRef.current);
         }
 
         async function handleDetect(addrList = addresses) {
@@ -302,9 +412,10 @@
           setDetectError('');
           try {
             const res = await detectTimezones(addrList);
+            // Group addresses by detected utc_label
             const zoneMap = {};
             for (const r of Array.isArray(res) ? res : []) {
-              const z = r.utc_label || r.tzid || r.zone || r.utc_zone;
+              const z = r.utc_label || r.tzid || r.zone || r.utc_zone || offsetToLabel(r.utc_offset_hours || 0);
               if (!z) continue;
               (zoneMap[z] = zoneMap[z] || []).push(r.address);
             }
@@ -318,11 +429,12 @@
                 rows = toggleRowsLifo(rows, z, {
                   addressCount: zoneMap[z].length,
                   sample: zoneMap[z].join(' | '),
-                  source: 'api',
+                  source: 'sim',
                 }).rows;
               }
               return rows;
             });
+            setStatus(`Detected ${addrList.length} address(es) across ${zones.length} zone(s).`);
           } catch (err) {
             console.error(err);
             setDetectError(err.message || 'Timezone detection failed');
@@ -336,92 +448,45 @@
           setAddresses(parsed);
         };
 
-        // -------------- Test runner (adds tests) --------------
-        function runTests() {
-          const results = [];
-          try {
-            // Test 1: address parsing (EVM + Solana; dedupe; ignore junk)
-            const parsed = parseAddresses('0x0000000000000000000000000000000000000000\nfoo\n1BoatSLRHtKNngkdXEeobR76b53LETtpyT\n0x0000000000000000000000000000000000000000');
-            results.push(['Parse EVM + Sol + dedupe', parsed.length >= 2 && parsed[0] !== parsed[1]]);
-
-            // Test 2: LIFO toggle rows (add then remove same zone)
-            const r1 = toggleRowsLifo([], 'UTC+1', { addressCount: 2, sample: 'a|b', source: 'ne' });
-            const r2 = toggleRowsLifo(r1.rows, 'UTC+1', { addressCount: 2, sample: 'a|b', source: 'ne' });
-            results.push(['Toggle add then remove', r1.rows.length === 1 && r2.rows.length === 0]);
-
-            // Test 3: FeatureCollection validator
-            results.push(['FALLBACK_FC is FeatureCollection', isFeatureCollection(FALLBACK_FC) === true]);
-            results.push(['Invalid object rejected', isFeatureCollection({ type: 'Feature', features: [] }) === false]);
-
-            // Test 4: Sanitizer drops invalid geometries & preserves valid
-            const dirty = {
-              type: 'FeatureCollection',
-              features: [
-                { type: 'Feature', properties: { tzid: 'bad' }, geometry: { type: 'Polygon', coordinates: [[[NaN, 0],[0,0],[0,1],[NaN,0]]] } },
-                { type: 'Feature', properties: { tzid: 'ok' },  geometry: { type: 'Polygon', coordinates: [[[0,0],[1,0],[1,1],[0,1],[0,0]]] } },
-              ],
-            };
-            const clean = sanitizeFeatureCollection(dirty);
-            results.push(['Sanitizer keeps only valid feature', isFeatureCollection(clean) && clean.features.length === 1 && getZoneName(clean.features[0].properties) === 'ok']);
-
-            // Test 5: Default style reflects selection
-            const selected = ['UTC+2'];
-            const styleFrom = (feature) => {
-              const label = getZoneName(feature?.properties || {});
-              return { fillColor: selected.includes(label) ? 'orange' : 'transparent' };
-            };
-            const sOk = styleFrom({ properties: { tzid: 'UTC+2' } }).fillColor === 'orange';
-            const uOk = styleFrom({ properties: { tzid: 'UTC+3' } }).fillColor === 'transparent';
-            results.push(['Style reacts to selection', sOk && uOk]);
-
-            // Test 6: Consistent pastel hashing
-            const c1 = pastelFromLabel('UTC+1');
-            const c2 = pastelFromLabel('UTC+1');
-            const c3 = pastelFromLabel('UTC+2');
-            results.push(['Pastel stable hash', c1 === c2 && c1 !== c3]);
-
-            // Test 7: Sanitizer accepts MultiPolygon
-            const mp = {
-              type: 'FeatureCollection',
-              features: [{ type: 'Feature', properties: { name: 'mp' }, geometry: { type: 'MultiPolygon', coordinates: [
-                [[[0,0],[1,0],[1,1],[0,1],[0,0]]],
-                [[[-10,-10],[-9,-10],[-9,-9],[-10,-9],[-10,-10]]]
-              ] } }]
-            };
-            const mpClean = sanitizeFeatureCollection(mp);
-            results.push(['Sanitizer MultiPolygon ok', isFeatureCollection(mpClean) && mpClean.features.length === 1]);
-
-            setTestResults(results);
-          } catch (e) {
-            results.push(['Tests threw', e.message || String(e)]);
-            setTestResults(results);
-          }
-        }
-
         return (
           <div style={{ maxWidth: 1100, margin: '0 auto', padding: 16, fontFamily: 'Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial', color: '#e8ecff' }}>
             <style>{`
               :root { --card: rgba(255,255,255,0.06); --stroke: rgba(255,255,255,0.12); --text: #e8ecff; --muted:#aab4d6; }
-              .fancy-bg { position: fixed; inset: -20vmax; z-index: -1; background: radial-gradient(60vmax 60vmax at 20% 10%, #2b5cff22, transparent), radial-gradient(50vmax 50vmax at 80% 30%, #00ffd522, transparent), radial-gradient(40vmax 40vmax at 50% 90%, #ff66cc22, transparent); filter: blur(40px); animation: float 16s ease-in-out infinite alternate; }
+              .fancy-bg { position: fixed; inset: -20vmax; z-index: -1;
+                background: radial-gradient(60vmax 60vmax at 20% 10%, #2b5cff22, transparent),
+                            radial-gradient(50vmax 50vmax at 80% 30%, #00ffd522, transparent),
+                            radial-gradient(40vmax 40vmax at 50% 90%, #ff66cc22, transparent);
+                filter: blur(40px); animation: float 16s ease-in-out infinite alternate; }
               @keyframes float { from { transform: translateY(-8px);} to { transform: translateY(8px);} }
-              .card { background: var(--card); border: 1px solid var(--stroke); border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.35); backdrop-filter: blur(8px); }
-              .btn { border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 700; transition: transform .12s ease, box-shadow .2s ease; }
+              .card { background: var(--card); border: 1px solid var(--stroke); border-radius: 16px;
+                box-shadow: 0 20px 60px rgba(0,0,0,.35); backdrop-filter: blur(8px); }
+              .btn { border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font-weight: 700;
+                transition: transform .12s ease, box-shadow .2s ease; }
               .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,0,0,.25); }
               .btn-primary { background: linear-gradient(135deg,#5c7cfa,#4dabf7); color: white; }
               .btn-plain { background: #0b1020; color: var(--text); border: 1px solid var(--stroke); }
-              .textarea { width: 100%; height: 140px; background: #081225; color: var(--text); border: 1px solid var(--stroke); border-radius: 12px; padding: 12px; }
-              .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; border: 1px solid var(--stroke); background: rgba(255,255,255,.05); font-size:12px; }
+              .textarea { width: 100%; height: 140px; background: #081225; color: var(--text);
+                border: 1px solid var(--stroke); border-radius: 12px; padding: 12px; }
+              .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px;
+                border: 1px solid var(--stroke); background: rgba(255,255,255,.05); font-size:12px; }
               .pill button { background: transparent; border: 0; color: #ffffffcc; cursor: pointer; border-radius: 999px; padding: 0 6px; }
               .table { width: 100%; border-collapse: collapse; font-size: 13px; color: var(--text); }
               .th, .td { padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,.08); }
               .thead { position: sticky; top: 0; background: #0f1424; z-index: 1; }
             `}</style>
+
             <div className="fancy-bg" />
             <h1 style={{ margin: 0, fontSize: 28, letterSpacing: .3 }}>
-              <span style={{ background: 'linear-gradient(135deg,#91a7ff,#63e6be)', WebkitBackgroundClip: 'text', color: 'transparent', fontWeight: 800 }}>UTC Timezones</span>
-              <span style={{ fontSize: 13, color: '#b6c2ff', fontWeight: 600, opacity: .9, marginLeft: 10 }}>real polygons • click to color</span>
+              <span style={{ background: 'linear-gradient(135deg,#91a7ff,#63e6be)', WebkitBackgroundClip: 'text', color: 'transparent', fontWeight: 800 }}>
+                UTC Timezones
+              </span>
+              <span style={{ fontSize: 13, color: '#b6c2ff', fontWeight: 600, opacity: .9, marginLeft: 10 }}>
+                real polygons • SIM (frontend-only)
+              </span>
             </h1>
-            <p style={{ marginTop: 6, color: '#c7d0ff', opacity: .85 }}>Paste addresses, click a zone to log it, click again to undo the last log for that zone.</p>
+            <p style={{ marginTop: 6, color: '#c7d0ff', opacity: .85 }}>
+              Paste addresses, click a zone to log it, click again to undo the last log for that zone.
+            </p>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1.45fr .55fr', gap: 16, marginTop: 14 }}>
               {/* Map card */}
@@ -439,7 +504,7 @@
                         {z}
                         <button title="Remove" onClick={() => {
                           setSelectedZones(prev => prev.filter(p => p !== z));
-                          setRows(prev => toggleRowsLifo(prev, z, { addressCount: 0, sample: '', source: 'ne' }).rows);
+                          setRows(prev => toggleRowsLifo(prev, z, { addressCount: 0, sample: '', source: 'sim' }).rows);
                         }}>×</button>
                       </span>
                     ))}
@@ -473,21 +538,25 @@
                   {detectError && (
                     <span style={{ fontSize: 12, color: '#ff6b6b' }}>{detectError}</span>
                   )}
-                  <button className="btn btn-plain" onClick={() => runTests()} style={{ marginLeft: 'auto' }}>
+                  <button
+                    className="btn btn-plain"
+                    onClick={() => {
+                      const results = [];
+                      try {
+                        const parsed = parseAddresses('0x0000000000000000000000000000000000000000\nfoo\n1BoatSLRHtKNngkdXEeobR76b53LETtpyT\n0x0000000000000000000000000000000000000000');
+                        results.push(['Parse EVM + Sol + dedupe', parsed.length >= 2 && parsed[0] !== parsed[1]]);
+                        const c1 = pastelFromLabel('UTC+1'), c2 = pastelFromLabel('UTC+1'), c3 = pastelFromLabel('UTC+2');
+                        results.push(['Pastel stable hash', c1 === c2 && c1 !== c3]);
+                        alert(results.map(([n, ok]) => `${n}: ${ok}`).join('\n'));
+                      } catch (e) {
+                        alert('Tests threw: ' + (e.message || String(e)));
+                      }
+                    }}
+                    style={{ marginLeft: 'auto' }}
+                  >
                     Run Tests
                   </button>
                 </div>
-                {testResults && (
-                  <div style={{ marginTop: 8, background: '#0f1a35', border: '1px solid rgba(255,255,255,.12)', borderRadius: 8, padding: 8 }}>
-                    <div style={{ fontWeight: 700, marginBottom: 4, color: '#c9d2ff' }}>Tests</div>
-                    {testResults.map((r, i) => (
-                      <div key={i} style={{ display: 'flex', gap: 8, fontSize: 12, color: '#dbe4ff' }}>
-                        <span style={{ opacity: 0.75 }}>{r[0]}:</span>
-                        <span>{String(r[1])}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
             </div>
 
@@ -527,7 +596,7 @@
             </div>
 
             <div style={{ marginTop: 8, fontSize: 12, color: '#aab4d6' }}>
-              Data: Natural Earth time zones (via TopoJSON). Basemap © OSM contributors. No Web3 used.
+              Data: Natural Earth time zones (via TopoJSON). Basemap © OSM contributors. SIM calls via your Cloudflare Worker.
             </div>
           </div>
         );
