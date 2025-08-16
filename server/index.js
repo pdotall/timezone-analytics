@@ -1,3 +1,6 @@
+// server/index.js  (SIM-powered timezone inference)
+// Drop-in replacement for your current server file
+
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
@@ -6,57 +9,60 @@ const NodeCache = require('node-cache');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const DUNE_PROXY_URL = process.env.DUNE_PROXY_URL;
 
-if (!DUNE_PROXY_URL) {
-  throw new Error('DUNE_PROXY_URL environment variable not set');
-}
+// Your Cloudflare worker (the one that forwards to api.sim.dune.com and adds X-API-Key)
+const SIM_PROXY_URL = process.env.SIM_PROXY_URL; // e.g. https://smart-money.pdotcapital.workers.dev/v1
+if (!SIM_PROXY_URL) throw new Error('SIM_PROXY_URL environment variable not set');
+
+// Comma-separated list of chain IDs to include (default: ETH, Polygon, Base, Optimism, Arbitrum)
+const SIM_CHAIN_IDS = (process.env.SIM_CHAIN_IDS || '1,137,8453,10,42161')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const ACTIVITY_LIMIT = parseInt(process.env.SIM_ACTIVITY_LIMIT || '1000', 10); // per address per chain
+const WORKERS = parseInt(process.env.WORKERS || '5', 10); // concurrent fetchers
 
 app.use(express.json());
 
 // basic rate limiting
-const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 10,
-});
+const limiter = rateLimit({ windowMs: 60 * 1000, max: 10 });
 app.use(limiter);
 
 // simple in-memory cache
-const cache = new NodeCache({ stdTTL: 300 }); // cache for 5 minutes
+const cache = new NodeCache({ stdTTL: 300 }); // 5 minutes
 
+// ----------------- helpers -----------------
 const tzExamples = {
   '-12': 'Etc/GMT+12',
   '-11': 'Pacific/Pago_Pago',
   '-10': 'Pacific/Honolulu',
-  '-9': 'America/Anchorage',
-  '-8': 'America/Los_Angeles',
-  '-7': 'America/Denver',
-  '-6': 'America/Chicago',
-  '-5': 'America/New_York',
-  '-4': 'America/Halifax',
-  '-3': 'America/Sao_Paulo',
-  '-2': 'Atlantic/South_Georgia',
-  '-1': 'Atlantic/Azores',
-  '0': 'Etc/UTC',
-  '1': 'Europe/Berlin',
-  '2': 'Europe/Kaliningrad',
-  '3': 'Europe/Moscow',
-  '4': 'Asia/Dubai',
-  '5': 'Asia/Karachi',
-  '6': 'Asia/Dhaka',
-  '7': 'Asia/Bangkok',
-  '8': 'Asia/Shanghai',
-  '9': 'Asia/Tokyo',
-  '10': 'Australia/Sydney',
-  '11': 'Pacific/Noumea',
-  '12': 'Pacific/Auckland',
-  '13': 'Pacific/Tongatapu',
-  '14': 'Pacific/Kiritimati',
+  '-9':  'America/Anchorage',
+  '-8':  'America/Los_Angeles',
+  '-7':  'America/Denver',
+  '-6':  'America/Chicago',
+  '-5':  'America/New_York',
+  '-4':  'America/Halifax',
+  '-3':  'America/Sao_Paulo',
+  '-2':  'Atlantic/South_Georgia',
+  '-1':  'Atlantic/Azores',
+  '0':   'Etc/UTC',
+  '1':   'Europe/Berlin',
+  '2':   'Europe/Kaliningrad',
+  '3':   'Europe/Moscow',
+  '4':   'Asia/Dubai',
+  '5':   'Asia/Karachi',
+  '6':   'Asia/Dhaka',
+  '7':   'Asia/Bangkok',
+  '8':   'Asia/Shanghai',
+  '9':   'Asia/Tokyo',
+  '10':  'Australia/Sydney',
+  '11':  'Pacific/Noumea',
+  '12':  'Pacific/Auckland',
+  '13':  'Pacific/Tongatapu',
+  '14':  'Pacific/Kiritimati',
 };
-
-function exampleTz(offset) {
-  return tzExamples[String(offset)] || 'Etc/UTC';
-}
+const exampleTz = (offset) => tzExamples[String(offset)] || 'Etc/UTC';
 
 function analyzeHourlyCounts(counts) {
   const total = counts.reduce((a, b) => a + b, 0);
@@ -78,7 +84,6 @@ function analyzeHourlyCounts(counts) {
   const utc_label = `UTC${bestOffset >= 0 ? '+' : ''}${bestOffset}`;
   const ratio = total ? bestScore / total : 0;
   const highBars = counts.filter((c) => c >= median * 3).length;
-  const bars_high_over_mult = highBars;
   const passes_rule = ratio > 0.5 && highBars >= 3;
   return {
     utc_offset_hours: bestOffset,
@@ -86,11 +91,62 @@ function analyzeHourlyCounts(counts) {
     iana_tz_example: exampleTz(bestOffset),
     median,
     ratio,
-    bars_high_over_mult,
+    bars_high_over_mult: highBars,
     passes_rule,
   };
 }
 
+// Turn a SIM /evm/activity page into hour buckets (UTC)
+function accumulateHoursFromActivity(counts24, activity, filterAddrLower) {
+  for (const ev of activity || []) {
+    try {
+      // Count *any* activity row for the wallet (send/receive/mint/burn…)
+      // SIM returns ev.block_time as ISO; convert to UTC hour
+      const ts = Date.parse(ev.block_time);
+      if (!Number.isFinite(ts)) continue;
+      // optional filter by wallet if present on object (defensive)
+      if (filterAddrLower && ev.wallet_address && ev.wallet_address.toLowerCase() !== filterAddrLower) continue;
+      const hourUtc = new Date(ts).getUTCHours();
+      counts24[hourUtc] = (counts24[hourUtc] || 0) + 1;
+    } catch {}
+  }
+  return counts24;
+}
+
+// Fetch one address across all configured chains and build its 24-hour UTC histogram
+async function fetchAddressHistogramSIM(address) {
+  const addrLower = address.toLowerCase();
+  const counts = new Array(24).fill(0);
+
+  // Work queue of (chain_id)
+  const queue = [...SIM_CHAIN_IDS];
+
+  // Simple worker pool
+  const workers = Array.from({ length: WORKERS }, async () => {
+    while (queue.length) {
+      const chainId = queue.pop();
+      const url = `${SIM_PROXY_URL}/evm/activity/${addrLower}` +
+        `?chain_ids=${encodeURIComponent(chainId)}` +
+        `&type=send,receive,mint,burn,swap,transfer` +
+        `&limit=${ACTIVITY_LIMIT}` +
+        `&sort_by=block_time&sort_order=asc`;
+
+      try {
+        const r = await axios.get(url, { timeout: 25_000 });
+        const activity = r.data?.activity || [];
+        accumulateHoursFromActivity(counts, activity, addrLower);
+      } catch (e) {
+        // Non-fatal: continue other chains
+        // console.error(`SIM activity error for ${address} on ${chainId}:`, e?.response?.status || e?.message);
+      }
+    }
+  });
+
+  await Promise.all(workers);
+  return counts;
+}
+
+// ----------------- API -----------------
 app.post('/api/timezone', async (req, res) => {
   try {
     const { addresses } = req.body || {};
@@ -98,35 +154,37 @@ app.post('/api/timezone', async (req, res) => {
       return res.status(400).json({ error: 'addresses array required' });
     }
 
-    const cacheKey = addresses.slice().sort().join(',');
+    // cache key indifferent to order
+    const cacheKey = addresses.map((a) => String(a).toLowerCase()).sort().join(',');
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
 
-    const response = await axios.post(DUNE_PROXY_URL, { addresses });
-    const rows = response.data?.result || [];
+    // Build results in parallel but polite (limit concurrency)
+    const queue = [...addresses.map(String)];
+    const results = [];
+    const workerCount = Math.min(WORKERS, Math.max(1, Math.ceil(addresses.length / 2)));
 
-    const grouped = {};
-    for (const row of rows) {
-      const addr = row.address;
-      if (!grouped[addr]) grouped[addr] = new Array(24).fill(0);
-      const h = row.hour_utc;
-      grouped[addr][h] = row.tx_count;
+    async function worker() {
+      while (queue.length) {
+        const address = queue.pop();
+        const counts = await fetchAddressHistogramSIM(address);
+        results.push({
+          address,
+          ...analyzeHourlyCounts(counts),
+        });
+      }
     }
 
-    const out = Object.entries(grouped).map(([address, counts]) => ({
-      address,
-      ...analyzeHourlyCounts(counts),
-    }));
+    await Promise.all(Array.from({ length: workerCount }, worker));
 
-    cache.set(cacheKey, out);
-    res.json(out);
+    cache.set(cacheKey, results);
+    res.json(results);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'failed to fetch timezone info' });
+    res.status(500).json({ error: 'failed to infer timezones from SIM' });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
-
