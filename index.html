@@ -32,8 +32,18 @@
           .split(/[\s,;\n\r]+/)
           .map((s) => s.trim())
           .filter(Boolean);
-        const uniq = Array.from(new Set(parts));
-        return uniq.filter((a) => isEvm(a) || isSol(a));
+        const seen = new Set();
+        const out = [];
+        for (const addr of parts) {
+          let key = null;
+          if (isEvm(addr)) key = addr.toLowerCase();
+          else if (isSol(addr)) key = addr;
+          else continue;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push(addr);
+        }
+        return out;
       };
 
       // Pretty color per zone label
