@@ -24,6 +24,10 @@ const WORKERS = parseInt(process.env.WORKERS || '5', 10); // concurrent fetchers
 app.use(cors({ origin: true }));     // allow cross-origin (useful during dev)
 app.use(express.json());
 
+// trust the first proxy (Codespaces/Cloudflare/Nginx/etc.)
+app.set('trust proxy', 1);
+
+
 // basic rate limiting
 const limiter = rateLimit({ windowMs: 60 * 1000, max: 10 });
 app.use(limiter);
