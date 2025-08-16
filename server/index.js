@@ -1,20 +1,18 @@
-// server/index.js  (SIM-powered timezone inference)
-// Drop-in replacement for your current server file
-
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
 const NodeCache = require('node-cache');
+const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Your Cloudflare worker (the one that forwards to api.sim.dune.com and adds X-API-Key)
+// Your Cloudflare Worker that forwards to api.sim.dune.com and adds X-API-Key
 const SIM_PROXY_URL = process.env.SIM_PROXY_URL; // e.g. https://smart-money.pdotcapital.workers.dev/v1
 if (!SIM_PROXY_URL) throw new Error('SIM_PROXY_URL environment variable not set');
 
-// Comma-separated list of chain IDs to include (default: ETH, Polygon, Base, Optimism, Arbitrum)
+// Comma-separated chain IDs to include (default: ETH, Polygon, Base, Optimism, Arbitrum)
 const SIM_CHAIN_IDS = (process.env.SIM_CHAIN_IDS || '1,137,8453,10,42161')
   .split(',')
   .map((s) => s.trim())
@@ -23,6 +21,7 @@ const SIM_CHAIN_IDS = (process.env.SIM_CHAIN_IDS || '1,137,8453,10,42161')
 const ACTIVITY_LIMIT = parseInt(process.env.SIM_ACTIVITY_LIMIT || '1000', 10); // per address per chain
 const WORKERS = parseInt(process.env.WORKERS || '5', 10); // concurrent fetchers
 
+app.use(cors({ origin: true }));     // allow cross-origin (useful during dev)
 app.use(express.json());
 
 // basic rate limiting
@@ -34,33 +33,14 @@ const cache = new NodeCache({ stdTTL: 300 }); // 5 minutes
 
 // ----------------- helpers -----------------
 const tzExamples = {
-  '-12': 'Etc/GMT+12',
-  '-11': 'Pacific/Pago_Pago',
-  '-10': 'Pacific/Honolulu',
-  '-9':  'America/Anchorage',
-  '-8':  'America/Los_Angeles',
-  '-7':  'America/Denver',
-  '-6':  'America/Chicago',
-  '-5':  'America/New_York',
-  '-4':  'America/Halifax',
-  '-3':  'America/Sao_Paulo',
-  '-2':  'Atlantic/South_Georgia',
-  '-1':  'Atlantic/Azores',
-  '0':   'Etc/UTC',
-  '1':   'Europe/Berlin',
-  '2':   'Europe/Kaliningrad',
-  '3':   'Europe/Moscow',
-  '4':   'Asia/Dubai',
-  '5':   'Asia/Karachi',
-  '6':   'Asia/Dhaka',
-  '7':   'Asia/Bangkok',
-  '8':   'Asia/Shanghai',
-  '9':   'Asia/Tokyo',
-  '10':  'Australia/Sydney',
-  '11':  'Pacific/Noumea',
-  '12':  'Pacific/Auckland',
-  '13':  'Pacific/Tongatapu',
-  '14':  'Pacific/Kiritimati',
+  '-12': 'Etc/GMT+12',  '-11': 'Pacific/Pago_Pago',    '-10': 'Pacific/Honolulu',
+  '-9':  'America/Anchorage','-8': 'America/Los_Angeles','-7': 'America/Denver',
+  '-6':  'America/Chicago','-5': 'America/New_York',   '-4': 'America/Halifax',
+  '-3':  'America/Sao_Paulo','-2': 'Atlantic/South_Georgia','-1': 'Atlantic/Azores',
+  '0':   'Etc/UTC','1': 'Europe/Berlin','2': 'Europe/Kaliningrad','3': 'Europe/Moscow',
+  '4':   'Asia/Dubai','5': 'Asia/Karachi','6': 'Asia/Dhaka','7': 'Asia/Bangkok',
+  '8':   'Asia/Shanghai','9': 'Asia/Tokyo','10': 'Australia/Sydney','11': 'Pacific/Noumea',
+  '12':  'Pacific/Auckland','13': 'Pacific/Tongatapu','14': 'Pacific/Kiritimati',
 };
 const exampleTz = (offset) => tzExamples[String(offset)] || 'Etc/UTC';
 
@@ -100,11 +80,8 @@ function analyzeHourlyCounts(counts) {
 function accumulateHoursFromActivity(counts24, activity, filterAddrLower) {
   for (const ev of activity || []) {
     try {
-      // Count *any* activity row for the wallet (send/receive/mint/burn…)
-      // SIM returns ev.block_time as ISO; convert to UTC hour
       const ts = Date.parse(ev.block_time);
       if (!Number.isFinite(ts)) continue;
-      // optional filter by wallet if present on object (defensive)
       if (filterAddrLower && ev.wallet_address && ev.wallet_address.toLowerCase() !== filterAddrLower) continue;
       const hourUtc = new Date(ts).getUTCHours();
       counts24[hourUtc] = (counts24[hourUtc] || 0) + 1;
@@ -118,30 +95,25 @@ async function fetchAddressHistogramSIM(address) {
   const addrLower = address.toLowerCase();
   const counts = new Array(24).fill(0);
 
-  // Work queue of (chain_id)
   const queue = [...SIM_CHAIN_IDS];
-
-  // Simple worker pool
   const workers = Array.from({ length: WORKERS }, async () => {
     while (queue.length) {
       const chainId = queue.pop();
-      const url = `${SIM_PROXY_URL}/evm/activity/${addrLower}` +
-        `?chain_ids=${encodeURIComponent(chainId)}` +
-        `&type=send,receive,mint,burn,swap,transfer` +
-        `&limit=${ACTIVITY_LIMIT}` +
-        `&sort_by=block_time&sort_order=asc`;
+      const url = `${SIM_PROXY_URL}/evm/activity/${addrLower}`
+        + `?chain_ids=${encodeURIComponent(chainId)}`
+        + `&type=send,receive,mint,burn,swap,transfer`
+        + `&limit=${ACTIVITY_LIMIT}`
+        + `&sort_by=block_time&sort_order=asc`;
 
       try {
         const r = await axios.get(url, { timeout: 25_000 });
         const activity = r.data?.activity || [];
         accumulateHoursFromActivity(counts, activity, addrLower);
       } catch (e) {
-        // Non-fatal: continue other chains
-        // console.error(`SIM activity error for ${address} on ${chainId}:`, e?.response?.status || e?.message);
+        // non-fatal; continue
       }
     }
   });
-
   await Promise.all(workers);
   return counts;
 }
@@ -154,12 +126,10 @@ app.post('/api/timezone', async (req, res) => {
       return res.status(400).json({ error: 'addresses array required' });
     }
 
-    // cache key indifferent to order
     const cacheKey = addresses.map((a) => String(a).toLowerCase()).sort().join(',');
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
 
-    // Build results in parallel but polite (limit concurrency)
     const queue = [...addresses.map(String)];
     const results = [];
     const workerCount = Math.min(WORKERS, Math.max(1, Math.ceil(addresses.length / 2)));
@@ -168,13 +138,9 @@ app.post('/api/timezone', async (req, res) => {
       while (queue.length) {
         const address = queue.pop();
         const counts = await fetchAddressHistogramSIM(address);
-        results.push({
-          address,
-          ...analyzeHourlyCounts(counts),
-        });
+        results.push({ address, ...analyzeHourlyCounts(counts) });
       }
     }
-
     await Promise.all(Array.from({ length: workerCount }, worker));
 
     cache.set(cacheKey, results);
