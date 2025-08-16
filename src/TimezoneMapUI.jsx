@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { detectTimezones } from './timezoneApi';
 
 /**
  * Interactive UTC Timezones — React + Leaflet (no react-leaflet)
@@ -125,6 +126,8 @@ export default function TimezoneMapUI() {
   const [rows, setRows] = useState([]);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [detectError, setDetectError] = useState('');
 
   // 1) Preferred: TzBB (IANA) GeoJSON you host
   const TZBB_GEOJSON_URL = 'https://YOUR-HOST/path/timezones-now.geojson'; // <-- TODO: set me
@@ -327,6 +330,42 @@ export default function TimezoneMapUI() {
     tzLayerRef.current = L.geoJSON(geoData, { style, onEachFeature }).addTo(mapRef.current);
   }
 
+  async function handleDetect(addrList = addresses) {
+    if (!addrList.length) return;
+    setDetecting(true);
+    setDetectError('');
+    try {
+      const res = await detectTimezones(addrList);
+      const zones = Array.isArray(res?.zones)
+        ? res.zones
+        : [res.zone || res.tzid || res.utc_zone].filter(Boolean);
+      if (!zones.length) throw new Error('No timezone returned');
+      setSelectedZones(zones);
+      setRows((prev) => {
+        let rows = prev;
+        for (const z of zones) {
+          rows = toggleRowsLifo(rows, z, {
+            addressCount: addrList.length,
+            sample: addrList.slice(0, 3).join(' | '),
+            source: 'api',
+          }).rows;
+        }
+        return rows;
+      });
+    } catch (err) {
+      console.error(err);
+      setDetectError(err.message || 'Timezone detection failed');
+    } finally {
+      setDetecting(false);
+    }
+  }
+
+  const handleParse = async () => {
+    const parsed = parseAddresses(addressInput);
+    setAddresses(parsed);
+    if (parsed.length) await handleDetect(parsed);
+  };
+
   // ---------- UI ----------
   return (
     <div
@@ -442,12 +481,24 @@ export default function TimezoneMapUI() {
             placeholder="Paste crypto addresses (EVM 0x..., Solana base58). One per line or separated by spaces/commas."
           />
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
-            <button className="btn btn-primary" onClick={() => setAddresses(parseAddresses(addressInput))}>
+            <button className="btn btn-primary" onClick={handleParse} disabled={detecting}>
               Parse
             </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => handleDetect()}
+              disabled={!addresses.length || detecting}
+            >
+              Detect Timezones
+            </button>
             <span style={{ fontSize: 12, color: '#b9c3e6' }}>
-              {addresses.length} valid address{addresses.length === 1 ? '' : 'es'}
+              {detecting
+                ? 'Detecting timezones…'
+                : `${addresses.length} valid address${addresses.length === 1 ? '' : 'es'}`}
             </span>
+            {detectError && (
+              <span style={{ fontSize: 12, color: '#ff6b6b' }}>{detectError}</span>
+            )}
             <button
               className="btn btn-plain"
               onClick={() => {
