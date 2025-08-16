@@ -128,6 +128,11 @@ export default function TimezoneMapUI() {
   const [loading, setLoading] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [detectError, setDetectError] = useState('');
+  const [zoneAddresses, setZoneAddresses] = useState({});
+  const zoneAddressesRef = useRef(zoneAddresses);
+  useEffect(() => {
+    zoneAddressesRef.current = zoneAddresses;
+  }, [zoneAddresses]);
 
   // 1) Preferred: TzBB (IANA) GeoJSON you host
   const TZBB_GEOJSON_URL = 'https://YOUR-HOST/path/timezones-now.geojson'; // <-- TODO: set me
@@ -230,7 +235,10 @@ export default function TimezoneMapUI() {
           color: selected ? color : '#6072a6',
           weight: selected ? 2 : 1,
         });
-        layer.bindTooltip(`${tzid} · ${currentOffsetLabel(tzid)}`, { sticky: true, direction: 'top' });
+        layer.bindTooltip(
+          `${tzid} · ${currentOffsetLabel(tzid)} · ${zoneAddressesRef.current[tzid]?.length || 0}`,
+          { sticky: true, direction: 'top' }
+        );
       });
     } catch {}
   }, [selectedZones]);
@@ -308,15 +316,19 @@ export default function TimezoneMapUI() {
 
     const onEachFeature = (feature, layer) => {
       const tzid = getZoneName(feature?.properties || {});
-      layer.bindTooltip(`${tzid} · ${currentOffsetLabel(tzid)}`, { sticky: true, direction: 'top' });
+      layer.bindTooltip(
+        `${tzid} · ${currentOffsetLabel(tzid)} · ${zoneAddressesRef.current[tzid]?.length || 0}`,
+        { sticky: true, direction: 'top' }
+      );
       layer.on('click', () => {
         setSelectedZones((prev) => {
           const already = prev.includes(tzid);
           setRows((prevRows) =>
             toggleRowsLifo(prevRows, tzid, {
-              addressCount: addresses.length,
-              sample: addresses.slice(0, 3).join(' | '),
-              source: TZBB_GEOJSON_URL && !TZBB_GEOJSON_URL.includes('YOUR-HOST') ? 'tzbb' : 'ne',
+              addressCount: zoneAddressesRef.current[tzid]?.length || 0,
+              sample: (zoneAddressesRef.current[tzid] || []).join(' | '),
+              source:
+                TZBB_GEOJSON_URL && !TZBB_GEOJSON_URL.includes('YOUR-HOST') ? 'tzbb' : 'ne',
             }).rows
           );
           return already ? prev.filter((z) => z !== tzid) : [tzid, ...prev];
@@ -336,17 +348,22 @@ export default function TimezoneMapUI() {
     setDetectError('');
     try {
       const res = await detectTimezones(addrList);
-      const zones = Array.isArray(res?.zones)
-        ? res.zones
-        : [res.zone || res.tzid || res.utc_zone].filter(Boolean);
+      const zoneMap = {};
+      for (const r of Array.isArray(res) ? res : []) {
+        const z = r.utc_label || r.tzid || r.zone || r.utc_zone;
+        if (!z) continue;
+        (zoneMap[z] = zoneMap[z] || []).push(r.address);
+      }
+      const zones = Object.keys(zoneMap);
       if (!zones.length) throw new Error('No timezone returned');
+      setZoneAddresses(zoneMap);
       setSelectedZones(zones);
-      setRows((prev) => {
-        let rows = prev;
+      setRows(() => {
+        let rows = [];
         for (const z of zones) {
           rows = toggleRowsLifo(rows, z, {
-            addressCount: addrList.length,
-            sample: addrList.slice(0, 3).join(' | '),
+            addressCount: zoneMap[z].length,
+            sample: zoneMap[z].join(' | '),
             source: 'api',
           }).rows;
         }
@@ -360,10 +377,9 @@ export default function TimezoneMapUI() {
     }
   }
 
-  const handleParse = async () => {
+  const handleParse = () => {
     const parsed = parseAddresses(addressInput);
     setAddresses(parsed);
-    if (parsed.length) await handleDetect(parsed);
   };
 
   // ---------- UI ----------
@@ -489,7 +505,7 @@ export default function TimezoneMapUI() {
               onClick={() => handleDetect()}
               disabled={!addresses.length || detecting}
             >
-              Detect Timezones
+              Run
             </button>
             <span style={{ fontSize: 12, color: '#b9c3e6' }}>
               {detecting
@@ -537,7 +553,7 @@ export default function TimezoneMapUI() {
                 <th className="th">Timezone</th>
                 <th className="th">Source</th>
                 <th className="th">Address Count</th>
-                <th className="th">Sample Addresses</th>
+                <th className="th">Addresses</th>
               </tr>
             </thead>
             <tbody>
