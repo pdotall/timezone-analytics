@@ -46,6 +46,16 @@
         return out;
       };
 
+      async function detectTimezones(addresses = []) {
+        const r = await fetch('/api/timezone', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ addresses }),
+        });
+        if (!r.ok) throw new Error(`API HTTP ${r.status}`);
+        return r.json();
+      }
+
       // Pretty color per zone label
       const pastelFromLabel = (label) => {
         let h = 0;
@@ -126,6 +136,11 @@
         const [status, setStatus] = useState('');
         const [loading, setLoading] = useState(false);
         const [testResults, setTestResults] = useState(null);
+        const [detecting, setDetecting] = useState(false);
+        const [detectError, setDetectError] = useState('');
+        const [zoneAddresses, setZoneAddresses] = useState({});
+        const zoneAddressesRef = useRef(zoneAddresses);
+        useEffect(() => { zoneAddressesRef.current = zoneAddresses; }, [zoneAddresses]);
 
         // Natural Earth TopoJSON → convert to GeoJSON in-browser
         const TOPO_URL = 'https://gist.githubusercontent.com/tschaub/cc70281ce4df5358eac38b34409b9ef9/raw/d152ba9e83d7733d9fb5f37f52202c0fcead834a/timezones.json';
@@ -194,6 +209,10 @@
                 color: selected ? pastelFromLabel(label) : '#6072a6',
                 weight: selected ? 2 : 1,
               });
+              layer.bindTooltip(
+                `${label} · ${(zoneAddressesRef.current[label] || []).length}`,
+                { sticky: true, direction: 'top' }
+              );
             });
           } catch {}
         }, [selectedZones]);
@@ -241,16 +260,20 @@
           };
           const onEachFeature = (feature, layer) => {
             const label = getZoneName(feature?.properties || {});
-            layer.bindTooltip(label, { sticky: true, direction: 'top' });
+            layer.bindTooltip(
+              `${label} · ${(zoneAddressesRef.current[label] || []).length}`,
+              { sticky: true, direction: 'top' }
+            );
             layer.on('click', () => {
               setSelectedZones((prev) => {
                 const already = prev.includes(label);
-                // Update table rows (LIFO toggle)
-                setRows((prevRows) => toggleRowsLifo(prevRows, label, {
-                  addressCount: addresses.length,
-                  sample: addresses.slice(0, 3).join(' | '),
-                  source: 'ne',
-                }).rows);
+                setRows((prevRows) =>
+                  toggleRowsLifo(prevRows, label, {
+                    addressCount: zoneAddressesRef.current[label]?.length || 0,
+                    sample: (zoneAddressesRef.current[label] || []).join(' | '),
+                    source: 'ne',
+                  }).rows
+                );
                 return already ? prev.filter((z) => z !== label) : [label, ...prev];
               });
               // Fit bounds
@@ -259,6 +282,46 @@
           };
           tzLayerRef.current = L.geoJSON(geoData, { style: defaultStyle, onEachFeature }).addTo(mapRef.current);
         }
+
+        async function handleDetect(addrList = addresses) {
+          if (!addrList.length) return;
+          setDetecting(true);
+          setDetectError('');
+          try {
+            const res = await detectTimezones(addrList);
+            const zoneMap = {};
+            for (const r of Array.isArray(res) ? res : []) {
+              const z = r.utc_label || r.tzid || r.zone || r.utc_zone;
+              if (!z) continue;
+              (zoneMap[z] = zoneMap[z] || []).push(r.address);
+            }
+            const zones = Object.keys(zoneMap);
+            if (!zones.length) throw new Error('No timezone returned');
+            setZoneAddresses(zoneMap);
+            setSelectedZones(zones);
+            setRows(() => {
+              let rows = [];
+              for (const z of zones) {
+                rows = toggleRowsLifo(rows, z, {
+                  addressCount: zoneMap[z].length,
+                  sample: zoneMap[z].join(' | '),
+                  source: 'api',
+                }).rows;
+              }
+              return rows;
+            });
+          } catch (err) {
+            console.error(err);
+            setDetectError(err.message || 'Timezone detection failed');
+          } finally {
+            setDetecting(false);
+          }
+        }
+
+        const handleParse = () => {
+          const parsed = parseAddresses(addressInput);
+          setAddresses(parsed);
+        };
 
         // -------------- Test runner (adds tests) --------------
         function runTests() {
@@ -381,9 +444,25 @@
                   placeholder="Paste crypto addresses (EVM 0x..., Solana base58). One per line or separated by spaces/commas."
                 />
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
-                  <button className="btn btn-primary" onClick={() => setAddresses(parseAddresses(addressInput))}>Parse</button>
-                  <span style={{ fontSize: 12, color: '#b9c3e6' }}>{addresses.length} valid address{addresses.length === 1 ? '' : 'es'}</span>
-                  <button className="btn btn-plain" onClick={() => runTests()} style={{ marginLeft: 'auto' }}>Run Tests</button>
+                  <button className="btn btn-primary" onClick={handleParse} disabled={detecting}>Parse</button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => handleDetect()}
+                    disabled={!addresses.length || detecting}
+                  >
+                    Run
+                  </button>
+                  <span style={{ fontSize: 12, color: '#b9c3e6' }}>
+                    {detecting
+                      ? 'Detecting timezones…'
+                      : `${addresses.length} valid address${addresses.length === 1 ? '' : 'es'}`}
+                  </span>
+                  {detectError && (
+                    <span style={{ fontSize: 12, color: '#ff6b6b' }}>{detectError}</span>
+                  )}
+                  <button className="btn btn-plain" onClick={() => runTests()} style={{ marginLeft: 'auto' }}>
+                    Run Tests
+                  </button>
                 </div>
                 {testResults && (
                   <div style={{ marginTop: 8, background: '#0f1a35', border: '1px solid rgba(255,255,255,.12)', borderRadius: 8, padding: 8 }}>
@@ -410,7 +489,7 @@
                       <th className="th">Timezone</th>
                       <th className="th">Source</th>
                       <th className="th">Address Count</th>
-                      <th className="th">Sample Addresses</th>
+                      <th className="th">Addresses</th>
                     </tr>
                   </thead>
                   <tbody>
