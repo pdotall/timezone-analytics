@@ -344,8 +344,9 @@
   function App(){
     // theme
     const [theme,setTheme]=useState(()=>{
-      const t=localStorage.getItem('ithil-theme'); return t==='sun'?'sun':'moon';
-    });
+    const t=localStorage.getItem('ithil-theme'); 
+    return t==='moon' ? 'moon' : 'sun';   });
+
     useEffect(()=>{ document.body.setAttribute('data-theme', theme==='sun'?'sun':'moon'); localStorage.setItem('ithil-theme',theme); },[theme]);
 
     const mapEl=useRef(null), mapRef=useRef(null), tzLayerRef=useRef(null);
