@@ -19,7 +19,7 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <script type="text/babel">
-      const {useEffect,useRef,useState,useMemo} = React;
+      const {useEffect,useRef,useState} = React;
 
       /* ===================== Utilities ===================== */
       const fmtUSD = (n)=> new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2}).format(n);
@@ -42,8 +42,7 @@
 
       const getZoneName=(props={})=>props.tzid||props.TZID||props.time_zone||props.NAME||props.name||'Timezone';
 
-      // same hashing used for consistent pastels
-      const pastelFromLabel=(label)=>{
+      const pastelHue=(label)=>{
         let h=0; const s=String(label||'');
         for(let i=0;i<s.length;i++) h=(h*31 + s.charCodeAt(i))>>>0;
         return h%360;
@@ -71,10 +70,8 @@
         }catch{return null;}
       }
 
-      // TopoJSON → GeoJSON loader fallback (Natural Earth)
       const TOPO_URL='https://gist.githubusercontent.com/tschaub/cc70281ce4df5358eac38b34409b9ef9/raw/d152ba9e83d7733d9fb5f37f52202c0fcead834a/timezones.json';
 
-      // Small fallback polygon (always valid)
       const FALLBACK_FC = {
         type:'FeatureCollection',
         features:[{
@@ -84,7 +81,6 @@
         }]
       };
 
-      // SIM client (no backend)
       const SIM_BASE = 'https://smart-money.pdotcapital.workers.dev/v1';
       async function fetchSimActivity(address){
         const url = `${SIM_BASE}/evm/activity/${address}?type=send,receive,mint,burn&limit=1000&sort_by=block_time&sort_order=asc`;
@@ -93,11 +89,10 @@
         return r.json();
       }
 
-      // Compute hourly UTC counts from SIM activity (all chains)
       function buildUtcHourlyCounts(activity){
         const counts = Array(24).fill(0);
         for(const ev of activity?.activity||[]){
-          const ts = Date.parse(ev.block_time); // ← already UTC
+          const ts = Date.parse(ev.block_time);
           if(!Number.isFinite(ts)) continue;
           const h = new Date(ts).getUTCHours();
           counts[h] += 1;
@@ -105,22 +100,17 @@
         return counts;
       }
 
-      // STRICT port of your SQL scoring (mult = 5.0, high=10–15, low=1–5)
       function scoreOffsetsExactlyLikeSQL(counts){
         const mult = 5.0;
         const HOURS = [...Array(24).keys()];
-        const OFFSETS = Array.from({length:27},(_,i)=>i-12); // -12 … +14
+        const OFFSETS = Array.from({length:27},(_,i)=>i-12);
 
-        // helper: median of values selected by mask
-        function maskedMedian(vals, maskFn){
-          const bucket=[];
-          for(const h of HOURS) if(maskFn(h)) bucket.push(counts[h]);
-          if(!bucket.length) return 0;
-          const s=bucket.slice().sort((a,b)=>a-b);
+        function median(vals){
+          if(!vals.length) return 0;
+          const s=vals.slice().sort((a,b)=>a-b);
           const mid=Math.floor(s.length/2);
           return s.length%2? s[mid] : (s[mid-1]+s[mid])/2;
         }
-
         function inHigh(local){ return local>=10 && local<=15; }
         function inLow(local){  return local>= 1 && local<= 5; }
 
@@ -128,23 +118,26 @@
         for(const offset of OFFSETS){
           const localFromUTC = (h)=> (h + offset + 24) % 24;
 
-          const med_10_15 = maskedMedian(counts, (utcH)=> inHigh(localFromUTC(utcH)));
-          const med_1_5   = maskedMedian(counts, (utcH)=> inLow(localFromUTC(utcH)));
+          const highs=[]; const lows=[];
+          for(const utcH of HOURS){
+            const local = localFromUTC(utcH);
+            if(inHigh(local)) highs.push(counts[utcH]);
+            if(inLow(local))  lows.push(counts[utcH]);
+          }
+          const med_10_15 = median(highs);
+          const med_1_5   = median(lows);
 
-          // bars_high_over_mult counts high hours whose utc_count ≥ mult * med_1_5
           let bars_high_over_mult = 0;
           for(const utcH of HOURS){
             const local = localFromUTC(utcH);
             if(inHigh(local) && counts[utcH] >= mult * (med_1_5||0)) bars_high_over_mult++;
           }
-
           const ratio = med_1_5===0 ? null : (med_10_15 / med_1_5);
           const passes_rule = (med_1_5>0) && (med_10_15 >= mult * med_1_5);
 
           rows.push({offset, med_10_15, med_1_5, ratio, bars_high_over_mult, passes_rule});
         }
 
-        // ORDER BY ratio DESC NULLS LAST, bars_high_over_mult DESC
         rows.sort((a,b)=>{
           const ar = (a.ratio==null?-Infinity:a.ratio);
           const br = (b.ratio==null?-Infinity:b.ratio);
@@ -152,17 +145,15 @@
           return (b.bars_high_over_mult)-(a.bars_high_over_mult);
         });
 
-        return rows[0]; // best for this address
+        return rows[0];
       }
 
-      // Label helper identical to your SQL
       function utcLabelFromOffset(off){
         if(off<0) return `UTC - ${Math.abs(off)}`;
         if(off>0) return `UTC + ${off}`;
         return 'UTC ± 0';
       }
 
-      // Live offset label for IANA tzid (tooltip nicety)
       function currentOffsetLabel(tzid, when=new Date()){
         try{
           const fmt=new Intl.DateTimeFormat('en-US',{timeZone:tzid,hour12:false,timeZoneName:'shortOffset'});
@@ -178,7 +169,6 @@
         }catch{return 'UTC±00:00';}
       }
 
-      // CSV export
       function toCSV(rows){
         const esc = (v)=> `"${String(v??'').replace(/"/g,'""')}"`;
         const header = ['Address','UTC Offset','UTC Label','IANA Example','Passes Rule','med_10_15','med_1_5','Ratio','Bars ≥ mult','UTC Label Count'];
@@ -200,7 +190,6 @@
         return lines.join('\n');
       }
 
-      // Confirm Modal
       function Modal({open,onClose,onConfirm,count,pricePer=0.5}){
         if(!open) return null;
         const total = count * pricePer;
@@ -212,42 +201,38 @@
           >
             <div style={{
               width:'min(92vw,420px)',
-              borderRadius:14,
-              border:'1px solid var(--stroke)',
-              background:'var(--card)',
-              boxShadow:'0 20px 60px rgba(0,0,0,.35)',
-              backdropFilter:'blur(8px)',
-              padding:18
+              borderRadius:16,
+              background:'var(--glass)',
+              border:'1px solid var(--stroke-strong)',
+              boxShadow:'0 30px 80px rgba(0,0,0,.35)',
+              backdropFilter:'blur(14px)',
+              padding:20
             }}>
               <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
                 <HeaderArt/>
                 <div style={{fontWeight:800,letterSpacing:.3}}>Confirm addresses</div>
+                <div style={{marginLeft:'auto',fontSize:12,opacity:.7}}>{count} total</div>
               </div>
               <div style={{fontSize:14,color:'var(--muted)'}}>
                 You are about to analyze <b style={{color:'var(--text)'}}>{count}</b> address{count===1?'':'es'}.
-                <div style={{marginTop:6}}>
-                  Price: <b style={{color:'var(--text)'}}>{fmtUSD(pricePer)}</b> per address
-                </div>
-                <div style={{marginTop:2}}>
-                  Total: <b style={{color:'var(--text)'}}>{fmtUSD(total)}</b>
-                </div>
+                <div style={{marginTop:6}}>Price: <b style={{color:'var(--text)'}}>{fmtUSD(pricePer)}</b> per address</div>
+                <div style={{marginTop:2}}>Total: <b style={{color:'var(--text)'}}>{fmtUSD(total)}</b></div>
               </div>
-              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:14}}>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
                 <button className="btn btn-plain" onClick={onClose}>Cancel</button>
                 <button className="btn btn-primary" onClick={()=>onConfirm(total)}>Confirm & Run</button>
               </div>
-              <div style={{marginTop:8, fontSize:11, color:'var(--muted)'}}>Note: demo UI only — no card is charged here.</div>
+              <div style={{marginTop:8, fontSize:11, color:'var(--muted)'}}>Demo only — integrate your processor in onConfirm.</div>
             </div>
           </div>
         );
       }
 
-      // Header icon (Sun + Moon minimal)
       const HeaderArt = () => (
-        <svg width="42" height="24" viewBox="0 0 42 24" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">
-          <circle cx="10" cy="12" r="4"/>
-          <path d="M10 2v2M10 20v2M2 12H0M20 12h-2M4.9 6.9l-1.4-1.4M17.5 19.5l-1.4-1.4M4.9 17.1l-1.4 1.4M17.5 4.5l-1.4 1.4"/>
-          <path d="M33 6.5c-3 1-5 3.9-5 7.2 0 3.9 3.1 7 7 7 3.3 0 6.2-2 7.2-5 -1.1.5-2.3.8-3.6.8 -3.4 0-6.6-2.4-7.6-5.9z" fill="currentColor" stroke="none" opacity="0.8"/>
+        <svg width="40" height="22" viewBox="0 0 40 22" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+          <circle cx="8" cy="11" r="4"/>
+          <path d="M8 1v2M8 19v2M1 11H-1M17 11h-2M3.6 5.6l-1.2-1.2M14.4 16.4l-1.2-1.2M3.6 16.4l-1.2 1.2M14.4 5.6l-1.2 1.2"/>
+          <path d="M32 5.5c-3 1-5 3.8-5 7 0 3.9 3.1 7 7 7 3.2 0 6-1.9 7-4.9-1.1.5-2.2.8-3.5.8-3.4 0-6.5-2.3-7.5-5.9z" fill="currentColor" stroke="none" opacity="0.85"/>
         </svg>
       );
 
@@ -256,7 +241,6 @@
         const mapRef=useRef(null);
         const tzLayerRef=useRef(null);
 
-        // theme — default SUN
         const [theme,setTheme]=useState(()=>{
           const t=localStorage.getItem('ithil-theme');
           return t==='moon'?'moon':'sun';
@@ -270,18 +254,12 @@
         const [status,setStatus]=useState('');
         const [loading,setLoading]=useState(false);
 
-        // table rows: one row per address
         const [rows,setRows]=useState([]);
-        // map gradient: zone label → count
         const [zoneCounts,setZoneCounts]=useState({});
-
-        // Confirm modal
         const [isModalOpen,setModalOpen]=useState(false);
 
-        // Map data
-        const [geoData,setGeoData]=useState(FALLBACK_FC);
+        const [geoData,setGeoData]=useState(null);
 
-        // loader helpers
         const loadScript=(src)=>new Promise((resolve,reject)=>{
           const existing=document.querySelector(`script[src="${src}"]`);
           if(existing){ if(existing.dataset.loaded==='true') return resolve();
@@ -300,26 +278,22 @@
           l.onload=resolve; l.onerror=reject; document.head.appendChild(l);
         });
 
-        // init map
         useEffect(()=>{
-          let cancelled=false;
           (async()=>{
             try{
               await loadCSS('https://unpkg.com/leaflet@1.9.4/dist/leaflet.css');
               await loadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js');
-              const L=window.L; if(!L) throw new Error('Leaflet failed to load');
+              const L=window.L;
               mapRef.current=L.map(mapEl.current,{minZoom:1.5,worldCopyJump:true,zoomSnap:.25,zoomDelta:.25}).setView([20,0],2.2);
               L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{opacity: theme==='sun'?0.5:0.35, attribution:'&copy; OSM'}).addTo(mapRef.current);
 
-              // Load NE Topo → GeoJSON
               await loadScript('https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js');
+              setLoading(true);
               try{
-                setLoading(true);
                 const r=await fetch(TOPO_URL,{cache:'reload'});
                 if(!r.ok) throw new Error(`TopoJSON HTTP ${r.status}`);
                 const topo=await r.json();
                 const keys=Object.keys(topo?.objects||{});
-                if(!keys.length) throw new Error('TopoJSON: no objects');
                 const bestKey=keys.find(k=>/time/i.test(k))||keys[0];
                 const fc=window.topojson.feature(topo, topo.objects[bestKey]);
                 const sanitized=sanitizeFeatureCollection(fc);
@@ -330,79 +304,57 @@
                 setStatus('Loaded fallback');
               }finally{ setLoading(false); }
 
-              renderZones(); // with initial (empty) counts
-
-              mapRef.current.on('click',(e)=>{
-                if(!e.originalEvent.target.closest?.('.leaflet-interactive')){/* no-op */}
-              });
-            }catch(err){ console.error(err); setStatus(err.message||String(err)); }
+              renderZones();
+            }catch(err){ setStatus(err.message||String(err)); }
           })();
-          return ()=>{cancelled=true; try{mapRef.current?.remove();}catch{}};
           // eslint-disable-next-line react-hooks/exhaustive-deps
         },[]);
 
-        // re-render polygons whenever geoData or counts or theme change
-        useEffect(()=>{ if(mapRef.current) renderZones(); /* eslint-disable-next-line */ },[geoData, zoneCounts, theme]);
+        useEffect(()=>{ if(mapRef.current) renderZones(); /* eslint-disable-line */ },[geoData,zoneCounts,theme]);
 
         function renderZones(){
           const L=window.L; if(!L||!mapRef.current||!geoData) return;
           if(tzLayerRef.current){ try{tzLayerRef.current.remove();}catch{} tzLayerRef.current=null; }
 
-          // find max for gradient scaling
-          const counts = zoneCounts;
-          const max = Object.values(counts).reduce((m,v)=> v>m?v:m, 0);
-
-          function zoneColor(label){
-            const count = counts[label]||0;
-            if(count===0) return 'transparent';
-            // base hue from label for deterministic, then darkness by count
-            const hue = pastelFromLabel(label);
-            const light = max>0 ? (80 - (count/max)*40) : 80; // 80% → 40% as count grows
-            return `hsl(${hue} 85% ${light}%)`;
-          }
-
+          const max = Object.values(zoneCounts).reduce((m,v)=> v>m?v:m, 0);
           const style=(feature)=>{
             const tzid=getZoneName(feature?.properties||{});
-            const fill = zoneColor(tzid);
-            const stroke = fill==='transparent' ? (theme==='sun'?'#c8cdd9':'#5b6477') : fill;
-            return { color: stroke, weight: 1, fillColor: fill, fillOpacity: fill==='transparent'?0:0.65 };
+            const count=zoneCounts[tzid]||0;
+            if(count===0){
+              return {
+                color: theme==='sun'?'#cfd5e3':'#5b6477',
+                weight: 1,
+                fillColor: 'transparent',
+                fillOpacity: 0
+              };
+            }
+            const hue = pastelHue(tzid);
+            const light = max>0 ? (80 - (count/max)*40) : 80;
+            const fill = `hsl(${hue} 85% ${light}%)`;
+            return { color: fill, weight: 1, fillColor: fill, fillOpacity: 0.68 };
           };
-
-          const onEachFeature=(feature,layer)=>{
+          const onEach=(feature,layer)=>{
             const tzid=getZoneName(feature?.properties||{});
             const count=zoneCounts[tzid]||0;
             layer.bindTooltip(`${tzid} · ${currentOffsetLabel(tzid)} · ${count}`,{sticky:true,direction:'top'});
           };
-
-          tzLayerRef.current = L.geoJSON(geoData,{style,onEachFeature}).addTo(mapRef.current);
+          tzLayerRef.current = L.geoJSON(geoData,{style,onEachFeature:onEach}).addTo(mapRef.current);
         }
 
-        // handle confirm: open modal with parsed addresses
         function openConfirm(){
           const parsed = parseAddresses(addressInput);
           setAddresses(parsed);
-          if(parsed.length===0){
-            setDetectError('No valid addresses found.');
-            return;
-          }
-          setDetectError('');
-          setModalOpen(true);
+          if(parsed.length===0){ setDetectError('No valid addresses found.'); return; }
+          setDetectError(''); setModalOpen(true);
         }
 
-        // When modal confirms, run detection
         async function handleConfirmRun(){
           setModalOpen(false);
-          await handleDetect();
-        }
-
-        // detection pipeline (SIM only; no backend)
-        async function handleDetect(){
           const addrs = addresses;
           if(!addrs.length) return;
           setDetecting(true); setDetectError('');
           try{
-            // 1) Per-address activity → hourly counts
-            const perAddr = [];
+            const perAddr=[];
             for(const a of addrs){
               const js = await fetchSimActivity(a);
               const counts = buildUtcHourlyCounts(js);
@@ -411,7 +363,6 @@
               const utc_offset_hours = best?.offset??0;
               const utc_label = utcLabelFromOffset(utc_offset_hours);
 
-              // IANA example mapping (as in your SQL list)
               const tzMap = {
                 "-12":'Etc/GMT+12', "-11":'Pacific/Pago_Pago', "-10":'Pacific/Honolulu',
                  "-9":'America/Anchorage', "-8":'America/Los_Angeles', "-7":'America/Denver',
@@ -423,13 +374,11 @@
                   "9":'Asia/Tokyo', "10":'Australia/Sydney', "11":'Pacific/Guadalcanal',
                   "12":'Pacific/Auckland', "13":'Pacific/Tongatapu', "14":'Pacific/Kiritimati'
               };
-              const iana = tzMap[String(utc_offset_hours)] || '';
-
               perAddr.push({
                 address:a,
                 utc_offset_hours,
                 utc_label,
-                iana_tz_example: iana,
+                iana_tz_example: tzMap[String(utc_offset_hours)] || '',
                 passes_rule: !!best?.passes_rule,
                 med_10_15: best?.med_10_15 ?? 0,
                 med_1_5: best?.med_1_5 ?? 0,
@@ -437,22 +386,15 @@
                 bars_high_over_mult: best?.bars_high_over_mult ?? 0
               });
             }
-
-            // 2) Count per label and decorate rows with utc_label_count
             const labelCount = perAddr.reduce((m,r)=>{ m[r.utc_label]=(m[r.utc_label]||0)+1; return m; },{});
             const finalRows = perAddr.map(r=>({...r, utc_label_count: labelCount[r.utc_label]}));
+
             setRows(finalRows);
-
-            // 3) Update map gradient using labels → counts
             setZoneCounts(labelCount);
-
             setStatus(`Analyzed ${finalRows.length} address${finalRows.length===1?'':'es'}.`);
           }catch(err){
-            console.error(err);
             setDetectError(err.message||'Failed to detect timezones');
-          }finally{
-            setDetecting(false);
-          }
+          }finally{ setDetecting(false); }
         }
 
         function downloadCSV(){
@@ -465,49 +407,57 @@
           URL.revokeObjectURL(url);
         }
 
-        // theme styles
         return (
           <div style={{
-            maxWidth:1100, margin:'0 auto', padding:16,
+            maxWidth:1120, margin:'0 auto', padding:16,
             fontFamily:'Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial',
             color:'var(--text)'
           }}>
             <style>{`
               :root{
-                --card: rgba(255,255,255,0.06);
-                --stroke: rgba(255,255,255,0.14);
-                --text: #0b0f1a;
-                --muted:#5d6578;
                 --bg: #ffffff;
-                --accent: #C9A034; /* gold */
+                --text: #151823;
+                --muted:#6a7284;
+                --accent: #C9A034;
+                --glass: linear-gradient(180deg, rgba(255,255,255,0.75), rgba(255,255,255,0.55));
+                --stroke: rgba(20,23,35,0.06);
+                --stroke-strong: rgba(20,23,35,0.14);
+                --shadow: 0 20px 60px rgba(0,0,0,.16);
               }
               :root[data-theme="moon"]{
-                --card: rgba(255,255,255,0.04);
-                --stroke: rgba(255,255,255,0.10);
-                --text: #e6e9f2;
-                --muted:#a2a9bc;
                 --bg: #0b1020;
+                --text: #e9edf7;
+                --muted:#9aa3b2;
                 --accent: #9aa3b2;
+                --glass: linear-gradient(180deg, rgba(30,36,57,0.60), rgba(20,24,40,0.52));
+                --stroke: rgba(255,255,255,0.08);
+                --stroke-strong: rgba(255,255,255,0.16);
+                --shadow: 0 20px 60px rgba(0,0,0,.35);
               }
               html,body{background:var(--bg)}
-              .card{background:var(--card); border:1px solid var(--stroke); border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,.20); backdrop-filter: blur(8px);}
+              .brand{ display:flex; align-items:center; gap:12px; font-weight:900; letter-spacing:.3px;}
+              .brand small{ font-weight:700; opacity:.7; }
+              .toggle{ display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px; background:var(--glass); border:1px solid var(--stroke-strong); backdrop-filter: blur(8px); cursor:pointer; user-select:none; }
+              .card{
+                background: var(--glass);
+                border:1px solid var(--stroke-strong);
+                border-radius:16px;
+                box-shadow: var(--shadow);
+                backdrop-filter: blur(12px);
+              }
+              .card-inner{ padding:14px; }
               .btn{border:0; border-radius:10px; padding:10px 14px; cursor:pointer; font-weight:700; transition:transform .12s ease, box-shadow .2s ease;}
-              .btn:hover{transform:translateY(-1px); box-shadow:0 8px 20px rgba(0,0,0,.18);}
+              .btn:hover{transform:translateY(-1px); box-shadow:0 10px 24px rgba(0,0,0,.18);}
               .btn-primary{ background: linear-gradient(135deg,var(--accent),#e7c56a); color: #1a1a1a;}
-              :root[data-theme="moon"] .btn-primary{ background: linear-gradient(135deg,#3a4354,#626b7c); color:#f3f5f9;}
-              .btn-plain{ background: transparent; color: var(--text); border: 1px solid var(--stroke);}
-              .textarea{ width:100%; height:140px; background: transparent; color: var(--text); border:1px solid var(--stroke); border-radius:12px; padding:12px; outline:none;}
-              .input{ width:100%; height:40px; background: transparent; color: var(--text); border:1px solid var(--stroke); border-radius:10px; padding:0 12px; outline:none;}
+              :root[data-theme="moon"] .btn-primary{ background: linear-gradient(135deg,#3d4658,#667186); color:#f3f6fb;}
+              .btn-plain{ background: transparent; color: var(--text); border: 1px solid var(--stroke-strong);}
+              .textarea{ width:100%; height:160px; background: transparent; color: var(--text); border:1px solid var(--stroke-strong); border-radius:12px; padding:12px; outline:none;}
+              .chip{ display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px; background:var(--glass); border:1px solid var(--stroke-strong); backdrop-filter: blur(8px); font-size:12px; }
               .row{ display:flex; align-items:center; gap:8px;}
               .space{ flex:1;}
               .table{ width:100%; border-collapse:collapse; font-size:13px; color:var(--text);}
               .th,.td{ padding:10px 8px; border-bottom:1px solid var(--stroke);}
               .thead{ position:sticky; top:0; background: var(--bg); z-index:1; }
-              .chip{ display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; border:1px solid var(--stroke); }
-              .toggle{ display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; border:1px solid var(--stroke); cursor:pointer; user-select:none;}
-              .toggle .knob{ width:16px; height:16px; border:1px solid var(--stroke); border-radius:50%; display:inline-block; background:var(--bg); }
-              .brand{ display:flex; align-items:center; gap:10px; font-weight:900; letter-spacing:.4px;}
-              .brand small{ font-weight:700; opacity:.7; }
             `}</style>
 
             <div className="row" style={{marginBottom:12}}>
@@ -517,90 +467,101 @@
                 <small>sun & moon</small>
               </div>
               <div className="space"></div>
-              <div
-                className="toggle"
-                onClick={()=>setTheme(t=>t==='sun'?'moon':'sun')}
-                title="Toggle theme"
-              >
-                <span>{theme==='sun'?'Sun':'Moon'}</span>
-                <span className="knob"></span>
+              <div className="toggle" onClick={()=>setTheme(t=>t==='sun'?'moon':'sun')} title="Toggle theme">
+                <span style={{fontWeight:800}}>{theme==='sun'?'Sun':'Moon'}</span>
               </div>
             </div>
 
-            <p style={{margin:'6px 0 0', color:'var(--muted)'}}>Paste addresses, click <b style={{color:'var(--text)'}}>Confirm</b> to approve pricing, then we’ll detect and shade timezone bands.</p>
+            <p style={{margin:'8px 0 0', color:'var(--muted)'}}>Paste addresses, click <b style={{color:'var(--text)'}}>Confirm</b> to approve pricing, then we’ll detect and shade timezone bands.</p>
 
             <div style={{display:'grid', gridTemplateColumns:'1.45fr .55fr', gap:16, marginTop:14}}>
-              <div className="card" style={{padding:14}}>
-                <div className="row" style={{marginBottom:10}}>
-                  <span style={{fontWeight:800}}>Map</span>
-                  <div className="space"></div>
-                  <span style={{fontSize:12, color:'var(--muted)'}}>{loading ? 'Loading timezones…' : status}</span>
-                </div>
-                <div ref={mapEl} style={{height:560, borderRadius:12, overflow:'hidden', boxShadow:'inset 0 0 0 1px var(--stroke)'}} />
-                <div style={{marginTop:10, fontSize:12, color:'var(--muted)'}}>
-                  Darker fill = more addresses labeled with that timezone.
+              <div className="card">
+                <div className="card-inner">
+                  <div className="row" style={{marginBottom:10}}>
+                    <span style={{fontWeight:800}}>Map</span>
+                    <div className="space"></div>
+                    <span style={{fontSize:12, color:'var(--muted)'}}>{loading ? 'Loading timezones…' : status}</span>
+                  </div>
+                  <div ref={mapEl} style={{height:560, borderRadius:12, overflow:'hidden', boxShadow:'inset 0 0 0 1px var(--stroke)'}} />
+                  <div style={{marginTop:10, fontSize:12, color:'var(--muted)'}}>Darker fill = more addresses labeled with that timezone.</div>
                 </div>
               </div>
 
-              <div className="card" style={{padding:14}}>
-                <div style={{marginBottom:10, fontWeight:800}}>Addresses</div>
-                <textarea
-                  className="textarea"
-                  placeholder="Paste EVM (0x...) or Solana base58 addresses (one per line, or separated by space/comma)"
-                  value={addressInput}
-                  onChange={(e)=>setAddressInput(e.target.value)}
-                />
-                <div className="row" style={{marginTop:8}}>
-                  <button className="btn btn-primary" onClick={openConfirm} disabled={detecting}>
-                    {detecting ? 'Working…' : 'Confirm'}
-                  </button>
-                  <button className="btn btn-plain" onClick={downloadCSV} disabled={!rows.length}>Download CSV</button>
-                  <div className="space"></div>
-                  <span style={{fontSize:12, color:'var(--muted)'}}>
-                    {addresses.length ? `${addresses.length} address${addresses.length===1?'':'es'} ready` : 'No parsed addresses yet'}
-                  </span>
+              <div className="card">
+                <div className="card-inner">
+                  <div style={{marginBottom:10, fontWeight:800}}>Addresses</div>
+                  <textarea
+                    className="textarea"
+                    placeholder="Paste EVM (0x...) or Solana base58 addresses (one per line, or separated by space/comma)"
+                    value={addressInput}
+                    onChange={(e)=>setAddressInput(e.target.value)}
+                    onBlur={()=>setAddresses(parseAddresses(addressInput))}
+                  />
+                  <div className="row" style={{marginTop:10}}>
+                    <span className="chip">
+                      <strong style={{fontWeight:800}}>Pricing</strong>
+                      <span>•</span>
+                      <span>$0.50 / address</span>
+                      <span>•</span>
+                      <span>Total: <b>{fmtUSD(parseAddresses(addressInput).length*0.5)}</b></span>
+                    </span>
+                    <div className="space"></div>
+                    <button className="btn btn-primary" onClick={openConfirm} disabled={detecting || parseAddresses(addressInput).length===0}>
+                      {detecting ? 'Working…' : 'Confirm'}
+                    </button>
+                    <button className="btn btn-plain" onClick={downloadCSV} disabled={!rows.length}>Download CSV</button>
+                  </div>
+                  <div className="row" style={{marginTop:8}}>
+                    <span style={{fontSize:12, color:'var(--muted)'}}>
+                      {parseAddresses(addressInput).length
+                        ? `${parseAddresses(addressInput).length} address${parseAddresses(addressInput).length===1?'':'es'} ready`
+                        : 'No parsed addresses yet'}
+                    </span>
+                    {detectError && <span style={{marginLeft:'auto', fontSize:12, color:'#d64545'}}>{detectError}</span>}
+                  </div>
                 </div>
-                {detectError && <div style={{marginTop:8, fontSize:12, color:'#d64545'}}>{detectError}</div>}
               </div>
             </div>
 
-            <div className="card" style={{marginTop:18, padding:12}}>
-              <div style={{fontWeight:800, marginBottom:8}}>Results</div>
-              <div style={{overflowX:'auto'}}>
-                <table className="table">
-                  <thead>
-                    <tr className="thead">
-                      <th className="th">Address</th>
-                      <th className="th">UTC Offset</th>
-                      <th className="th">UTC Label</th>
-                      <th className="th">IANA Example</th>
-                      <th className="th">Passes Rule</th>
-                      <th className="th">med_10_15</th>
-                      <th className="th">med_1_5</th>
-                      <th className="th">Ratio</th>
-                      <th className="th">Bars ≥ mult</th>
-                      <th className="th">UTC Label Count</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.length===0 ? (
-                      <tr><td className="td" colSpan={10} style={{opacity:.7}}>No results yet — paste addresses and Confirm.</td></tr>
-                    ): rows.map((r,i)=>(
-                      <tr key={r.address+'_'+i}>
-                        <td className="td" style={{fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,"Liberation Mono","Courier New",monospace'}}>{r.address}</td>
-                        <td className="td">{r.utc_offset_hours}</td>
-                        <td className="td">{r.utc_label}</td>
-                        <td className="td">{r.iana_tz_example}</td>
-                        <td className="td">{String(r.passes_rule)}</td>
-                        <td className="td">{r.med_10_15}</td>
-                        <td className="td">{r.med_1_5}</td>
-                        <td className="td">{r.ratio==null?'':r.ratio.toFixed ? r.ratio.toFixed(3) : r.ratio}</td>
-                        <td className="td">{r.bars_high_over_mult}</td>
-                        <td className="td">{r.utc_label_count}</td>
+            <div className="card" style={{marginTop:18}}>
+              <div className="card-inner">
+                <div style={{fontWeight:800, marginBottom:8}}>Results</div>
+                <div style={{overflowX:'auto'}}>
+                  <table className="table">
+                    <thead>
+                      <tr className="thead">
+                        <th className="th">Address</th>
+                        <th className="th">UTC Offset</th>
+                        <th className="th">UTC Label</th>
+                        <th className="th">IANA Example</th>
+                        <th className="th">Passes Rule</th>
+                        <th className="th">med_10_15</th>
+                        <th className="th">med_1_5</th>
+                        <th className="th">Ratio</th>
+                        <th className="th">Bars ≥ mult</th>
+                        <th className="th">UTC Label Count</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {rows.length===0 ? (
+                        <tr><td className="td" colSpan={10} style={{opacity:.7}}>No results yet — paste addresses and Confirm.</td></tr>
+                      ): rows.map((r,i)=>(
+                        <tr key={r.address+'_'+i}>
+                          <td className="td" style={{fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,"Liberation Mono","Courier New",monospace'}}>{r.address}</td>
+                          <td className="td">{r.utc_offset_hours}</td>
+                          <td className="td">{r.utc_label}</td>
+                          <td className="td">{r.iana_tz_example}</td>
+                          <td className="td">{String(r.passes_rule)}</td>
+                          <td className="td">{r.med_10_15}</td>
+                          <td className="td">{r.med_1_5}</td>
+                          <td className="td">{r.ratio==null?'':(r.ratio.toFixed?r.ratio.toFixed(3):r.ratio)}</td>
+                          <td className="td">{r.bars_high_over_mult}</td>
+                          <td className="td">{r.utc_label_count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
 
