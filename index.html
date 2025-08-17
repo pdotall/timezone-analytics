@@ -80,13 +80,13 @@
     return `UTC - ${Math.abs(offset)}`;
   }
 
-  const pastelFromLabel = (label) => {
-    let h = 0;
-    const s = String(label || '');
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-    const hue = h % 360;
-    return `hsl(${hue} 85% 70%)`;
-  };
+  // single-hue gradient color (light → dark) based on count intensity
+  function colorForCount(count, max) {
+    if (!max || count <= 0) return null; // transparent
+    const t = Math.max(0, Math.min(1, count / max)); // 0..1
+    const light = 85 - 45 * t;                       // 85% → 40%
+    return `hsl(220 90% ${light}%)`;                 // blue-ish
+  }
 
   const isFeatureCollection = (obj) => !!obj && obj.type === 'FeatureCollection' && Array.isArray(obj.features);
   const isNumber = (x) => typeof x === 'number' && Number.isFinite(x);
@@ -122,7 +122,6 @@
   };
 
   const isEvm = (s) => /^(0x)[0-9a-fA-F]{40}$/.test(s);
-  const isSol = (s) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
   const parseAddresses = (text) => {
     const parts = String(text || '')
       .split(/[\s,;\n\r]+/)
@@ -133,7 +132,6 @@
     for (const addr of parts) {
       let key = null;
       if (isEvm(addr)) key = addr.toLowerCase();
-      else if (isSol(addr)) continue;
       else continue;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -196,12 +194,9 @@
 
   function predictTimezoneFromCountsSQL(countMap) {
     let best = null;
-
     for (let offset=-12; offset<=14; offset++) {
       const { high, low } = HOUR_MAP.get(offset);
-
-      const highVals = [];
-      const lowVals  = [];
+      const highVals = [], lowVals = [];
       for (const h of high) { if (countMap.has(h)) highVals.push(countMap.get(h)); }
       for (const h of low)  { if (countMap.has(h))  lowVals.push(countMap.get(h)); }
 
@@ -274,14 +269,11 @@
     const [detecting, setDetecting] = useState(false);
     const [detectError, setDetectError] = useState('');
 
-    // map of zone -> addresses (for group counts & chips)
     const [zoneAddresses, setZoneAddresses] = useState({});
     const zoneAddressesRef = useRef(zoneAddresses);
     useEffect(()=>{ zoneAddressesRef.current = zoneAddresses; }, [zoneAddresses]);
 
-    // NEW: per-address results for the results table
     const [results, setResults] = useState([]);
-
     const [geoData, setGeoData] = useState(FALLBACK_FC);
 
     const loadScript = (src) => new Promise((resolve,reject)=>{
@@ -335,26 +327,35 @@
       return () => { try { mapRef.current?.remove(); } catch {} };
     }, []);
 
+    // Re-style when selection changes
     useEffect(() => {
       if (!tzLayerRef.current) return;
       try {
+        const L = window.L;
         tzLayerRef.current.eachLayer((layer) => {
           const feature = layer.feature || {};
           const raw = getZoneName(feature.properties || {});
           const label = polyToUiLabel(raw);
+
+          const countsMap = zoneAddressesRef.current || {};
+          const max = Math.max(0, ...Object.values(countsMap).map(a => a.length || 0));
+          const cnt = (countsMap[label] || []).length || 0;
+          const fill = colorForCount(cnt, max);
+
           const selected = selectedZones.includes(label);
           layer.setStyle({
-            fillColor: selected ? pastelFromLabel(label) : 'transparent',
-            fillOpacity: selected ? 0.6 : 0,
-            color: selected ? pastelFromLabel(label) : '#6072a6',
+            fillColor: fill || 'transparent',
+            fillOpacity: fill ? (selected ? 0.75 : 0.6) : 0,
+            color: fill ? fill : '#6072a6',
             weight: selected ? 2 : 1,
           });
-          layer.bindTooltip(`${label} · ${(zoneAddressesRef.current[label] || []).length}`, { sticky: true, direction: 'top' });
+          layer.bindTooltip(`${label} · ${cnt}`, { sticky: true, direction: 'top' });
         });
       } catch {}
     }, [selectedZones]);
 
-    useEffect(() => { if (mapRef.current) renderZones(); }, [geoData]);
+    // Re-render polygons when geoData or zone counts change
+    useEffect(() => { if (mapRef.current) renderZones(); }, [geoData, zoneAddresses]);
 
     async function loadZones() {
       setLoading(true);
@@ -387,19 +388,27 @@
       const style = (feature) => {
         const raw = getZoneName(feature?.properties || {});
         const label = polyToUiLabel(raw);
+
+        const countsMap = zoneAddressesRef.current || {};
+        const max = Math.max(0, ...Object.values(countsMap).map(a => a.length || 0));
+        const cnt = (countsMap[label] || []).length || 0;
+        const fill = colorForCount(cnt, max);
+
         const selected = selectedZonesRef.current.includes(label);
         return {
-          color: selected ? pastelFromLabel(label) : '#6072a6',
+          color: fill ? fill : '#6072a6',
           weight: selected ? 2 : 1,
-          fillColor: selected ? pastelFromLabel(label) : 'transparent',
-          fillOpacity: selected ? 0.6 : 0
+          fillColor: fill || 'transparent',
+          fillOpacity: fill ? (selected ? 0.75 : 0.6) : 0
         };
       };
 
       const onEachFeature = (feature, layer) => {
         const raw = getZoneName(feature?.properties || {});
         const label = polyToUiLabel(raw);
-        layer.bindTooltip(`${label} · ${(zoneAddressesRef.current[label] || []).length}`, { sticky: true, direction: 'top' });
+        const cnt = (zoneAddressesRef.current[label] || []).length || 0;
+
+        layer.bindTooltip(`${label} · ${cnt}`, { sticky: true, direction: 'top' });
         layer.on('click', () => {
           setSelectedZones((prev) => {
             const already = prev.includes(label);
@@ -435,9 +444,9 @@
         const zones = Object.keys(zoneMap);
         if (!zones.length) throw new Error('No timezone returned');
 
-        setZoneAddresses(zoneMap);        // for group counts & chips
+        setZoneAddresses(zoneMap);        // for gradient + chips
         setSelectedZones(zones);          // color polygons
-        setResults(perAddress);           // NEW: per-address table
+        setResults(perAddress);           // table
       } catch (err) {
         console.error(err);
         setDetectError(err.message || 'Timezone detection failed');
@@ -451,8 +460,30 @@
       setAddresses(parsed);
     };
 
-    // helper to get group count per row
+    // group count
     const groupCount = (label) => (zoneAddresses[label] || []).length || 0;
+
+    // -------- CSV download ----------
+    function toCSV(rows) {
+      const header = ['Address','Timezone','Timezone Name','Count'].join(',');
+      const lines = rows.map(r =>
+        [r.address, r.utc_label, r.iana, groupCount(r.utc_label)]
+          .map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')
+      );
+      return [header, ...lines].join('\n');
+    }
+    function downloadCSV() {
+      const csv = toCSV(results);
+      const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'timezone_results.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
 
     return (
       <div style={{ maxWidth: 1100, margin: '0 auto', padding: 16, fontFamily: 'Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial', color: '#e8ecff' }}>
@@ -492,7 +523,7 @@
           </span>
         </h1>
         <p style={{ marginTop: 6, color: '#c7d0ff', opacity: .85 }}>
-          Paste addresses, click a zone to color. “Count” shows how many addresses share that timezone.
+          Paste addresses, click Run. Map is a gradient: darker = more addresses in that zone.
         </p>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1.45fr .55fr', gap: 16, marginTop: 14 }}>
@@ -507,7 +538,7 @@
               <div style={{ marginTop: 10, display:'flex', flexWrap:'wrap', gap:8 }}>
                 {selectedZones.map((z) => (
                   <span key={z} className="pill">
-                    <span style={{ width:10, height:10, borderRadius:999, background: pastelFromLabel(z), boxShadow:'0 0 0 2px rgba(0,0,0,.25) inset' }} />
+                    <span style={{ width:10, height:10, borderRadius:999, background: 'hsl(220 90% 60%)', boxShadow:'0 0 0 2px rgba(0,0,0,.25) inset' }} />
                     {z}
                     <button title="Remove" onClick={() => {
                       setSelectedZones(prev => prev.filter(p => p !== z));
@@ -542,7 +573,10 @@
 
         {/* Results (per address) */}
         <div className="card" style={{ marginTop: 18, padding: 12 }}>
-          <div style={{ fontWeight: 700, marginBottom: 8, color: '#c9d2ff' }}>Results</div>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+            <div style={{ fontWeight: 700, marginBottom: 8, color: '#c9d2ff' }}>Results</div>
+            <button className="btn btn-plain" onClick={downloadCSV} disabled={!results.length}>Download CSV</button>
+          </div>
           <div style={{ overflowX: 'auto' }}>
             <table className="table">
               <thead>
