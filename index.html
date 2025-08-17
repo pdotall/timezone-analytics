@@ -28,7 +28,6 @@
          CONFIG
       ============================== */
       // Your Cloudflare Worker proxy that forwards to SIM and adds X-API-Key:
-      // (Change this if you use a different proxy)
       const SIM_BASE = 'https://smart-money.pdotcapital.workers.dev/v1';
 
       // Timezone polygons source (Natural Earth TopoJSON)
@@ -98,7 +97,6 @@
          We color polygons by numeric UTC offset.
       ============================== */
       function extractOffsetFromProps(props = {}) {
-        // Try to glean an integer offset from strings like "UTC-05:00", "-5", "Etc/GMT+5", etc.
         const candidates = [
           props.tzid, props.TZID, props.time_zone, props.NAME, props.name, props.zone, props.offset, props.utc
         ];
@@ -111,16 +109,15 @@
             const sign = m[1] === '-' ? -1 : 1;
             const hh = parseInt(m[2], 10);
             const mm = m[3] ? parseInt(m[3], 10) : 0;
-            const frac = hh + (mm >= 30 ? 1 : 0); // snap half-hours upward to nearest hour
-            return sign * frac;
+            const fracHour = hh + (mm >= 30 ? 1 : 0); // snap half-hour upward to nearest hour for banding
+            return sign * fracHour;
           }
-          // Fallback plain signed hour in text: e.g., "UTC - 5" or "offset -5"
+          // Fallback plain signed hour in text: e.g., "UTC - 5"
           m = s.match(/[-+]\d{1,2}/);
           if (m) return parseInt(m[0], 10);
           // Numeric field as number
           if (typeof c === 'number' && Number.isFinite(c)) return Math.trunc(c);
         }
-        // Last resort: 0 (UTC)
         return 0;
       }
 
@@ -157,7 +154,7 @@
       }
 
       /* ==============================
-         SQL-IDENTICAL SCORING
+         SQL-IDENTICAL SCORING (NO ZEROS!)
       ============================== */
       const OFFSETS = Array.from({ length: 27 }, (_, i) => i - 12); // −12..+14
       const IN_HIGH = (local) => local >= 10 && local <= 15; // 10..15
@@ -192,8 +189,8 @@
         [ 14, 'Pacific/Kiritimati'],
       ]);
 
-      function median(arr) {
-        if (!arr.length) return 0;
+      function medianOrNull(arr) {
+        if (!arr.length) return null;
         const a = [...arr].sort((x, y) => x - y);
         const n = a.length;
         return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
@@ -203,28 +200,52 @@
         if (!Array.isArray(counts24) || counts24.length !== 24) return null;
         let best = null;
 
+        // Build list of hours that have tx (u rows in SQL). No zeros included.
+        const presentUTC = [];
+        for (let utc = 0; utc < 24; utc++) {
+          if ((counts24[utc] || 0) > 0) presentUTC.push(utc);
+        }
+
         for (const offset of OFFSETS) {
-          const highVals = [];
+          const highVals = []; // only include hours that had tx
           const lowVals  = [];
-          for (let utc = 0; utc < 24; utc++) {
-            const local = (utc + offset + 24) % 24;
+          for (const utc of presentUTC) {
             const v = counts24[utc] || 0;
+            const local = (utc + offset + 24) % 24;
             if (IN_HIGH(local)) highVals.push(v);
             if (IN_LOW(local))  lowVals.push(v);
           }
 
-          const med_10_15 = median(highVals);
-          const med_1_5   = median(lowVals);
-          const ratio     = med_1_5 === 0 ? null : (med_10_15 / med_1_5);
-          const thresh = mult * med_1_5;
-          const bars_high_over_mult = highVals.reduce((acc, v) => acc + (v >= thresh ? 1 : 0), 0);
-          const passes_rule = (med_1_5 > 0) && (med_10_15 >= thresh);
+          const med_10_15 = medianOrNull(highVals);
+          const med_1_5   = medianOrNull(lowVals);
+
+          // ratio: NULL if med_1_5 is 0 or null (SQL: med_10_15 / NULLIF(med_1_5, 0))
+          let ratio = null;
+          if (med_1_5 !== null && med_1_5 !== 0) {
+            ratio = (med_10_15 ?? 0) / med_1_5;
+          }
+
+          // bars_high_over_mult: only count if threshold is valid number
+          let bars_high_over_mult = 0;
+          const threshold = (med_1_5 !== null) ? mult * med_1_5 : null;
+          if (threshold !== null && Number.isFinite(threshold)) {
+            for (const v of highVals) {
+              if (v >= threshold) bars_high_over_mult++;
+            }
+          }
+
+          // passes_rule: (med_1_5 > 0 AND med_10_15 >= mult*med_1_5)
+          const passes_rule =
+            (med_1_5 !== null && med_1_5 > 0) &&
+            (med_10_15 !== null && med_10_15 >= mult * med_1_5);
 
           const row = { offset, med_10_15, med_1_5, ratio, bars_high_over_mult, passes_rule };
+
+          // ORDER BY ratio DESC NULLS LAST, bars_high_over_mult DESC
           const isBetter = (() => {
             if (!best) return true;
             const a = row.ratio, b = best.ratio;
-            if (a == null && b != null) return false;
+            if (a == null && b != null) return false; // NULLS LAST
             if (a != null && b == null) return true;
             if (a != null && b != null) {
               if (a > b + 1e-12) return true;
@@ -239,8 +260,8 @@
         if (!best) return null;
         return {
           ...best,
-          utc_label:      canonicalUtcLabel(best.offset), // "UTC-3"
-          utc_label_sql:  sqlStyleUtcLabel(best.offset),  // "UTC - 3"
+          utc_label:       canonicalUtcLabel(best.offset), // e.g., "UTC-3"
+          utc_label_sql:   sqlStyleUtcLabel(best.offset),  // e.g., "UTC - 3"
           iana_tz_example: IANA_BY_OFFSET.get(best.offset) || 'Etc/UTC',
         };
       }
@@ -249,19 +270,17 @@
          SIM FETCH (ALL CHAINS)
       ============================== */
       async function fetchAddressHourlyCounts(address) {
-        // No chain_ids → include all chains; sort ascending in time; expand limit to reduce sparsity
+        // No chain_ids → include all chains; widen limit; ascending time
         const url =
           `${SIM_BASE}/evm/activity/${address}`
-          + `?type=send,receive,mint,burn&sort_by=block_time&sort_order=asc&limit=1000`;
+          + `?type=send,receive,mint,burn&sort_by=block_time&sort_order=asc&limit=2000`;
         const r = await fetch(url);
         if (!r.ok) throw new Error(`SIM HTTP ${r.status}`);
         const { activity = [] } = await r.json();
         const counts = new Array(24).fill(0);
         for (const ev of activity) {
-          if (ev.asset_type && ev.asset_type !== 'erc20' && ev.asset_type !== 'native' && ev.asset_type !== 'erc721' && ev.asset_type !== 'erc1155') {
-            // keep all types; we’re counting "activity", but you can filter to erc20-only by uncommenting line below:
-            // if (ev.asset_type !== 'erc20') continue;
-          }
+          // We are mimicking evms.transactions "from"/"to" aggregation at tx level;
+          // SIM activity is coarser but we at least bucket block_time into UTC hours:
           const h = utcHourFromISO(ev.block_time);
           counts[h] += 1;
         }
@@ -288,14 +307,14 @@
         const [detecting, setDetecting] = useState(false);
         const [detectError, setDetectError] = useState('');
 
-        const [zoneAddresses, setZoneAddresses] = useState({}); // { 'UTC-3': [addr1, addr2] }
+        const [zoneAddresses, setZoneAddresses] = useState({}); // keyed by canonical label (e.g., "UTC-3")
         const zoneAddressesRef = useRef(zoneAddresses);
         useEffect(() => { zoneAddressesRef.current = zoneAddresses; }, [zoneAddresses]);
 
         const [geoData, setGeoData] = useState(null);
         const [featureOffsets, setFeatureOffsets] = useState([]); // per feature numeric offset
 
-        const [debugInfo, setDebugInfo] = useState(null); // {address, counts, med_10_15, med_1_5, ratio, bars_high_over_mult, utc_label, utc_label_sql}
+        const [debugInfo, setDebugInfo] = useState(null);
 
         // External loaders
         const loadScript = (src) => new Promise((resolve, reject) => {
@@ -397,9 +416,10 @@
           const onEachFeature = (feature, layer) => {
             const idx = (geoData.features || []).indexOf(feature);
             const off = featureOffsets[idx] ?? 0;
-            const label = canonicalUtcLabel(off);
-            const count = (zoneAddressesRef.current[label] || []).length;
-            layer.bindTooltip(`${label} · ${count}`, { sticky: true, direction: 'top' });
+            const labelCanon = canonicalUtcLabel(off);     // used for mapping counts
+            const labelSQL   = sqlStyleUtcLabel(off);      // used for display
+            const count = (zoneAddressesRef.current[labelCanon] || []).length;
+            layer.bindTooltip(`${labelSQL} · ${count}`, { sticky: true, direction: 'top' });
             layer.on('click', () => {
               setSelectedOffsets((prev) => {
                 const already = prev.includes(off);
@@ -407,16 +427,16 @@
                 return [off, ...prev];
               });
               try { if (layer.getBounds) mapRef.current.fitBounds(layer.getBounds(), { padding: [20, 20] }); } catch {}
-              // Log click row
+              // Log click row (display SQL label, count via canonical key)
               setRows((prev) => {
-                const zone = canonicalUtcLabel(off);
-                const addrCount = (zoneAddressesRef.current[zone] || []).length;
-                const sample = (zoneAddressesRef.current[zone] || []).join(' | ');
+                const zoneDisplay = labelSQL;
+                const addrCount = (zoneAddressesRef.current[labelCanon] || []).length;
+                const sample = (zoneAddressesRef.current[labelCanon] || []).join(' | ');
                 const ts = new Date().toISOString();
-                const i = prev.findIndex((r) => r.zone === zone);
+                const i = prev.findIndex((r) => r.zone === zoneDisplay);
                 if (i === 0) return prev.slice(1);
                 if (i > 0) return [...prev.slice(0, i), ...prev.slice(i + 1)];
-                return [{ ts, zone, source: 'click', address_count: addrCount, sample }, ...prev];
+                return [{ ts, zone: zoneDisplay, source: 'click', address_count: addrCount, sample }, ...prev];
               });
             });
           };
@@ -447,14 +467,14 @@
             const results = [];
             for (const address of addrList) {
               const counts = await fetchAddressHourlyCounts(address);
-              const scored = scoreBestOffset(counts, 5.0);
+              const scored = scoreBestOffset(counts, 5.0); // params.mult = 5.0
               if (!scored) continue;
               results.push({
                 address,
                 counts,
                 utc_offset_hours: scored.offset,
-                utc_label: scored.utc_label,       // "UTC-3"
-                utc_label_sql: scored.utc_label_sql, // "UTC - 3"
+                utc_label: scored.utc_label,          // canonical
+                utc_label_sql: scored.utc_label_sql,  // SQL display
                 iana_tz_example: scored.iana_tz_example,
                 passes_rule: scored.passes_rule,
                 med_10_15: scored.med_10_15,
@@ -464,11 +484,10 @@
               });
             }
 
-            // Zone → addresses
+            // Zone → addresses (keyed by canonical label)
             const zoneMap = {};
             for (const r of results) {
-              const z = r.utc_label;
-              (zoneMap[z] = zoneMap[z] || []).push(r.address);
+              (zoneMap[r.utc_label] = zoneMap[r.utc_label] || []).push(r.address);
             }
             setZoneAddresses(zoneMap);
 
@@ -476,12 +495,19 @@
             const offs = [...new Set(results.map((r) => r.utc_offset_hours))];
             setSelectedOffsets(offs);
 
-            // Log rows
+            // Log rows (display SQL-style label in table)
             setRows(() => {
               let next = [];
               for (const off of offs) {
-                const zone = canonicalUtcLabel(off);
-                next = [{ ts: new Date().toISOString(), zone, source: 'detect', address_count: (zoneMap[zone] || []).length, sample: (zoneMap[zone] || []).join(' | ') }, ...next];
+                const zoneCanon = canonicalUtcLabel(off);
+                const zoneSQL   = sqlStyleUtcLabel(off);
+                next = [{
+                  ts: new Date().toISOString(),
+                  zone: zoneSQL,
+                  source: 'detect',
+                  address_count: (zoneMap[zoneCanon] || []).length,
+                  sample: (zoneMap[zoneCanon] || []).join(' | ')
+                }, ...next];
               }
               return next;
             });
@@ -562,10 +588,10 @@
                 {selectedOffsets.length > 0 && (
                   <div style={{ marginTop: 10, display:'flex', flexWrap:'wrap', gap:8 }}>
                     {selectedOffsets.map((off) => {
-                      const lab = canonicalUtcLabel(off);
+                      const lab = sqlStyleUtcLabel(off); // display SQL format in chips
                       return (
                         <span key={lab} className="pill">
-                          <span style={{ width:10, height:10, borderRadius:999, background: pastelFromLabel(lab), boxShadow:'0 0 0 2px rgba(0,0,0,.25) inset' }} />
+                          <span style={{ width:10, height:10, borderRadius:999, background: pastelFromLabel(canonicalUtcLabel(off)), boxShadow:'0 0 0 2px rgba(0,0,0,.25) inset' }} />
                           {lab}
                           <button title="Remove" onClick={() => setSelectedOffsets(prev => prev.filter(p => p !== off))}>×</button>
                         </span>
@@ -585,8 +611,8 @@
                   placeholder="Paste crypto addresses (EVM 0x..., Solana base58). One per line or separated by spaces/commas."
                 />
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
-                  <button className="btn btn-primary" onClick={handleParse} disabled={detecting}>Parse</button>
-                  <button className="btn btn-primary" onClick={() => handleDetect()} disabled={!addresses.length || detecting}>
+                  <button className="btn btn-primary" onClick={() => setAddresses(parseAddresses(addressInput))} disabled={detecting}>Parse</button>
+                  <button className="btn btn-primary" onClick={() => handleDetect(addresses)} disabled={!addresses.length || detecting}>
                     Run Prediction
                   </button>
                   <span style={{ fontSize: 12, color: '#b9c3e6' }}>
@@ -602,11 +628,11 @@
                     <div style={{ fontSize: 12, color: '#dbe4ff' }}>
                       <div><b>Address:</b> {debugInfo.address}</div>
                       <div><b>UTC Label:</b> {debugInfo.utc_label} ({debugInfo.utc_label_sql})</div>
-                      <div><b>med_10_15:</b> {debugInfo.med_10_15} &nbsp; <b>med_1_5:</b> {debugInfo.med_1_5}</div>
-                      <div><b>ratio:</b> {debugInfo.ratio?.toFixed ? debugInfo.ratio.toFixed(3) : String(debugInfo.ratio)}</div>
+                      <div><b>med_10_15:</b> {debugInfo.med_10_15 ?? 'NULL'} &nbsp; <b>med_1_5:</b> {debugInfo.med_1_5 ?? 'NULL'}</div>
+                      <div><b>ratio:</b> {debugInfo.ratio == null ? 'NULL' : debugInfo.ratio.toFixed(3)}</div>
                       <div><b>bars_high_over_mult:</b> {debugInfo.bars_high_over_mult}</div>
                       <div style={{ marginTop: 6 }}>
-                        <b>Counts (UTC hours 0→23):</b><br />
+                        <b>Counts (UTC hours 0→23, only used if >0):</b><br />
                         {debugInfo.counts.map((v,i)=>`${i}:${v}`).join('  ')}
                       </div>
                     </div>
