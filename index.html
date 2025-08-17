@@ -5,8 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Ithil Anor — Timezone Inference</title>
   <meta name="description" content="Ithil Anor — minimal, sharp timezone inference from on-chain activity (SQL-accurate)."/>
+
   <style>
-    /* ========= THEME ========= */
+    /* ================= THEME TOKENS (Night / Moon as default) ================= */
     :root{
       --bg: #0b0e13;
       --panel: #0f1218;
@@ -15,34 +16,53 @@
       --muted: #9aa3b2;
       --text: #eef3ff;
       --text-2: #c9d1e1;
-      --accent: #5b8cff;         /* actions */
-      --accent-2: #88aaff;       /* lighter */
-      --danger: #ff6b6b;
+      --accent: #5b8cff;     /* links / buttons */
+      --accent-2: #88aaff;   /* focus */
       --ok: #63e6be;
+      --danger: #ff6b6b;
 
+      --hue: 220;            /* choropleth hue: blue for moon */
       --radius: 12px;
       --shadow: 0 12px 28px rgba(0,0,0,.35);
       --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       --sans: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
     }
 
+    /* ===== Sun / Light theme ===== */
+    body[data-theme="sun"]{
+      --bg: #ffffff;
+      --panel: #ffffff;
+      --panel-2: #fafbfe;
+      --border: #e9edf5;
+      --muted: #6c778a;
+      --text: #101318;
+      --text-2: #232a34;
+      --accent: #b6922e;     /* gold */
+      --accent-2: #e6c561;
+      --ok: #2f9e44;
+      --danger: #d63939;
+
+      --hue: 42;             /* golden hue for choropleth */
+      --shadow: 0 10px 24px rgba(10,15,20,.08);
+    }
+
     html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);}
 
-    /* ========= LAYOUT ========= */
+    /* ================= LAYOUT ================= */
     .wrap{max-width:1180px;margin:0 auto;padding:18px;}
     .topbar{
-      display:flex;align-items:center;justify-content:space-between;
-      padding:10px 14px;margin-bottom:14px;border:1px solid var(--border);
+      display:flex;align-items:center;justify-content:space-between;gap:14px;
+      padding:12px 16px;margin-bottom:14px;border:1px solid var(--border);
       background:linear-gradient(180deg,var(--panel),var(--panel-2));
       border-radius:var(--radius);box-shadow:var(--shadow);
     }
     .brand{
       display:flex;align-items:center;gap:12px;font-weight:800;letter-spacing:.25px;
     }
-    .brand-title{font-size:18px}
+    .brand-title{font-size:19px}
     .brand-sub{font-size:12px;color:var(--muted)}
     .status{font-size:12px;color:var(--muted)}
-    .grid{display:grid;grid-template-columns:1.5fr .8fr;gap:14px}
+    .grid{display:grid;grid-template-columns:1.55fr .85fr;gap:14px}
     .card{
       border:1px solid var(--border);background:var(--panel);border-radius:var(--radius);box-shadow:var(--shadow);
     }
@@ -53,38 +73,53 @@
     .muted{color:var(--muted)}
     .mono{font-family:var(--mono)}
 
-    /* ========= INPUTS / BUTTONS ========= */
+    /* ================= INPUTS / BUTTONS ================= */
     .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .input{
-      width:100%;height:132px;background:#0b1018;border:1px solid var(--border);
+      width:100%;height:132px;background:transparent;border:1px solid var(--border);
       border-radius:10px;color:var(--text);padding:10px;font-family:var(--mono);font-size:12px;
     }
     .btn{
-      border:1px solid var(--border);background:#0b1018;color:var(--text);padding:8px 12px;font-weight:700;
+      border:1px solid var(--border);background:transparent;color:var(--text);padding:8px 12px;font-weight:700;
       border-radius:10px;cursor:pointer;transition:all .15s ease;
     }
-    .btn:focus{outline:2px solid var(--accent-2);outline-offset:1px}
     .btn:hover{transform:translateY(-1px);border-color:#2a3550}
-    .btn.primary{background:linear-gradient(180deg,#5b8cff,#4c79e8);border-color:#4c79e8}
+    .btn:focus{outline:2px solid var(--accent-2);outline-offset:1px}
+    .btn.primary{background:linear-gradient(180deg,var(--accent),#4c79e8);border-color:#4c79e8;color:#fff}
+    body[data-theme="sun"] .btn.primary{
+      background:linear-gradient(180deg,#f0d67a,var(--accent));border-color:var(--accent);color:#5d4912;
+    }
     .btn.ghost{background:transparent}
 
-    /* ========= MAP / CHIPS ========= */
-    #map{height:560px;border-radius:10px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.04)}
+    /* ================= MAP / CHIPS ================= */
+    #map{height:560px;border-radius:10px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(0,0,0,.06)}
+    body[data-theme="sun"] #map{box-shadow:inset 0 0 0 1px rgba(0,0,0,.04)}
     .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
     .chip{
       display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid var(--border);
-      background:#0c111a;font-size:12px;color:var(--text-2)
+      background:transparent;font-size:12px;color:var(--text-2)
     }
-    .chip .dot{width:8px;height:8px;border-radius:999px;background:#5b8cff;opacity:.8}
+    .chip .dot{width:8px;height:8px;border-radius:999px;background:var(--accent);opacity:.85}
     .chip button{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 2px}
     .chip button:hover{color:var(--text)}
 
-    /* ========= TABLE ========= */
+    /* ================= TABLE ================= */
     .table-wrap{overflow:auto}
     table{width:100%;border-collapse:collapse;font-size:13px}
-    thead th{position:sticky;top:0;background:#0f1420;border-bottom:1px solid var(--border);text-align:left;padding:10px 8px;color:var(--text-2)}
-    tbody td{padding:10px 8px;border-bottom:1px solid rgba(255,255,255,.05)}
-    tbody tr:hover{background:#0e1420}
+    thead th{position:sticky;top:0;background:var(--panel-2);border-bottom:1px solid var(--border);text-align:left;padding:10px 8px;color:var(--text-2)}
+    tbody td{padding:10px 8px;border-bottom:1px solid rgba(0,0,0,.06)}
+    body[data-theme="sun"] tbody td{border-bottom:1px solid rgba(0,0,0,.04)}
+    tbody tr:hover{background:rgba(0,0,0,.06)}
+    body[data-theme="sun"] tbody tr:hover{background:#f8f9fb}
+
+    /* ================= TOGGLE (Sun/Moon) ================= */
+    .theme-toggle{display:flex;align-items:center;gap:10px}
+    .toggle-btn{
+      display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);
+      background:transparent;border-radius:999px;padding:6px 10px;cursor:pointer;color:var(--text-2);
+    }
+    .toggle-btn:hover{border-color:var(--accent)}
+    .toggle-ico{width:18px;height:18px;display:block}
 
     /* small screen */
     @media (max-width: 980px){
@@ -104,9 +139,7 @@
 <script type="text/babel">
   const { useEffect, useRef, useState } = React;
 
-  /* =======================
-     DATA CONFIG
-  ======================= */
+  /* ======================= DATA CONFIG ======================= */
   const SIM_PROXY = 'https://smart-money.pdotcapital.workers.dev/v1';
   const NE_TOPO_URL =
     'https://gist.githubusercontent.com/tschaub/cc70281ce4df5358eac38b34409b9ef9/raw/d152ba9e83d7733d9fb5f37f52202c0fcead834a/timezones.json';
@@ -122,9 +155,7 @@
     [12,'Pacific/Auckland'],[13,'Pacific/Tongatapu'],[14,'Pacific/Kiritimati']
   ]);
 
-  /* =======================
-     HELPERS
-  ======================= */
+  /* ======================= HELPERS ======================= */
   const getZoneName = (props = {}) =>
     props.tzid || props.TZID || props.time_zone || props.NAME || props.name || 'Timezone';
 
@@ -200,12 +231,22 @@
   }
   const HOUR_MAP = buildHourMap();
 
-  // blue single-hue gradient
+  function getHue(){
+    const root = getComputedStyle(document.body);
+    const v = root.getPropertyValue('--hue').trim();
+    const h = parseFloat(v); return Number.isFinite(h) ? h : 220;
+  }
+
+  // theme-driven single-hue gradient
   function colorForCount(count,max){
     if(!max || count<=0) return null;
     const t=Math.max(0,Math.min(1,count/max));
-    const l=85 - 45*t; // 85% -> 40%
-    return `hsl(220 90% ${l}%)`;
+    const hue = getHue();
+    const sat = document.body.dataset.theme === 'sun' ? 85 : 90;
+    const l = document.body.dataset.theme === 'sun'
+      ? (90 - 45*t)  // light -> gold
+      : (85 - 45*t); // dark -> blue
+    return `hsl(${hue} ${sat}% ${l}%)`;
   }
 
   async function fetchTxHoursForAddress(address, cap=3000){
@@ -233,6 +274,7 @@
     return counts;
   }
 
+  // SQL-identical predictor
   function predictTimezoneFromCountsSQL(countMap){
     let best=null;
     for(let ofs=-12; ofs<=14; ofs++){
@@ -285,10 +327,27 @@
     };
   }
 
-  /* =======================
-     APP
-  ======================= */
+  /* ======================= SVG ICONS ======================= */
+  const SunIcon = ({className}) => (
+    <svg className={className||'toggle-ico'} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+      <circle cx="12" cy="12" r="4"/>
+      <path d="M12 2v2M12 20v2M4 12H2M22 12h-2M5 5l-1.4-1.4M20.4 20.4 19 19M19 5l1.4-1.4M4 20.4 5.4 19"/>
+    </svg>
+  );
+  const MoonIcon = ({className}) => (
+    <svg className={className||'toggle-ico'} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+      <path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/>
+    </svg>
+  );
+
+  /* ======================= APP ======================= */
   function App(){
+    // theme
+    const [theme,setTheme]=useState(()=>{
+      const t=localStorage.getItem('ithil-theme'); return t==='sun'?'sun':'moon';
+    });
+    useEffect(()=>{ document.body.setAttribute('data-theme', theme==='sun'?'sun':'moon'); localStorage.setItem('ithil-theme',theme); },[theme]);
+
     const mapEl=useRef(null), mapRef=useRef(null), tzLayerRef=useRef(null);
     const [addresses,setAddresses]=useState([]);
     const [addressInput,setAddressInput]=useState('');
@@ -325,7 +384,7 @@
           await loadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js');
           const L=window.L; if(!L) throw new Error('Leaflet failed to load');
           mapRef.current=L.map(mapEl.current,{minZoom:1.5,worldCopyJump:true,zoomSnap:.25,zoomDelta:.25}).setView([20,0],2.2);
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{opacity:.55,attribution:'&copy; OSM'}).addTo(mapRef.current);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{opacity:.6,attribution:'&copy; OSM'}).addTo(mapRef.current);
           await loadScript('https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js');
           await loadZones(); renderZones();
           mapRef.current.on('click',(e)=>{ if(!e.originalEvent.target.closest?.('.leaflet-interactive')) setSelectedZones([]); });
@@ -334,8 +393,8 @@
       return()=>{try{mapRef.current?.remove();}catch{}};
     },[]);
 
-    // Update polygon styles on selection & data
-    useEffect(()=>{ if(mapRef.current) renderZones(); },[geoData,zoneAddresses,selectedZones]);
+    // Re-render polygons when theme/geo/data changes so gradient hue follows theme
+    useEffect(()=>{ if(mapRef.current) renderZones(); },[geoData,zoneAddresses,selectedZones,theme]);
 
     async function loadZones(){
       setLoading(true);
@@ -360,7 +419,7 @@
         const countsMap=zoneAddressesRef.current||{}; const max=Math.max(0,...Object.values(countsMap).map(a=>a.length||0));
         const cnt=(countsMap[label]||[]).length||0; const fill=colorForCount(cnt,max);
         const selected = selectedZonesRef.current.includes(label);
-        return { color: fill||'#283448', weight: selected?2:1, fillColor: fill||'transparent', fillOpacity: fill? (selected?.75:.6) : 0 };
+        return { color: fill||'#2a3a55', weight: selected?2:1, fillColor: fill||'transparent', fillOpacity: fill ? (selected? .75 : .6) : 0 };
       };
 
       const onEach=(feature,layer)=>{
@@ -409,15 +468,36 @@
       document.body.removeChild(a); URL.revokeObjectURL(url);
     }
 
+    /* ===== Minimal art in brand ===== */
+    const HeaderArt = () => (
+      <svg width="42" height="24" viewBox="0 0 42 24" fill="none" stroke="currentColor" stroke-width="1.2">
+        <!-- Sun (left) -->
+        <circle cx="10" cy="12" r="4" />
+        <path d="M10 2v2M10 20v2M2 12H0M20 12h-2" />
+        <!-- Moon (right) -->
+        <path d="M34 20a7 7 0 1 1 0-12 5 5 0 0 0 0 12Z" />
+      </svg>
+    );
+
     return (
       <div>
         {/* Topbar */}
         <div className="topbar">
           <div className="brand">
-            <div className="brand-title">Ithil Anor</div>
-            <div className="brand-sub">sun · moon — timezone inference</div>
+            <HeaderArt/>
+            <div>
+              <div className="brand-title">Ithil Anor</div>
+              <div className="brand-sub">sun · moon — timezone inference</div>
+            </div>
           </div>
-          <div className="status">{loading ? 'Loading time zones…' : (detecting ? 'Detecting…' : 'Ready')}</div>
+
+          <div className="theme-toggle">
+            <button className="toggle-btn" onClick={()=>setTheme(t=>t==='sun'?'moon':'sun')}>
+              {theme==='sun' ? <MoonIcon/> : <SunIcon/>}
+              <span>{theme==='sun' ? 'Moon' : 'Sun'}</span>
+            </button>
+            <div className="status">{loading ? 'Loading time zones…' : (detecting ? 'Detecting…' : 'Ready')}</div>
+          </div>
         </div>
 
         {/* Main */}
@@ -483,7 +563,7 @@
                     <td className="mono">{r.address}</td>
                     <td>{r.utc_label}</td>
                     <td>{r.iana}</td>
-                    <td>{countByLabel(r.utc_label)}</td>
+                    <td>{(zoneAddresses[r.utc_label]||[]).length||0}</td>
                   </tr>
                 ))
               )}
