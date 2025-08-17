@@ -24,17 +24,11 @@
   /* =======================
      CONFIG
   ======================= */
-  // Your Cloudflare Worker (adds SIM key, CORS, caching)
   const SIM_PROXY = 'https://smart-money.pdotcapital.workers.dev/v1';
-
-  // Natural Earth TopoJSON → we convert to GeoJSON on the fly
   const NE_TOPO_URL =
     'https://gist.githubusercontent.com/tschaub/cc70281ce4df5358eac38b34409b9ef9/raw/d152ba9e83d7733d9fb5f37f52202c0fcead834a/timezones.json';
-
-  // SQL-identical multiplier
   const MULT = 5.0;
 
-  // IANA examples (exactly as your SQL)
   const IANA_EXAMPLE = new Map([
     [-12, 'Etc/GMT+12'],
     [-11, 'Pacific/Pago_Pago'],
@@ -71,7 +65,6 @@
   const getZoneName = (props = {}) =>
     props.tzid || props.TZID || props.time_zone || props.NAME || props.name || 'Timezone';
 
-  // Normalize polygon labels to our UI label format (so click coloring matches detection)
   function polyToUiLabel(raw) {
     if (!raw) return 'UTC ± 0';
     const m = String(raw).match(/UTC\s*([+-])\s*(\d{1,2})/i);
@@ -81,15 +74,12 @@
     if (h === '0') return 'UTC ± 0';
     return `UTC ${sign} ${h}`;
   }
-
-  // UI label from numeric offset (SQL final_labeled)
   function offsetToUiLabel(offset) {
     if (offset === 0) return 'UTC ± 0';
     if (offset > 0)  return `UTC + ${offset}`;
     return `UTC - ${Math.abs(offset)}`;
   }
 
-  // Pretty color per zone label
   const pastelFromLabel = (label) => {
     let h = 0;
     const s = String(label || '');
@@ -132,7 +122,7 @@
   };
 
   const isEvm = (s) => /^(0x)[0-9a-fA-F]{40}$/.test(s);
-  const isSol = (s) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s); // ignored for SIM, but we parse consistently
+  const isSol = (s) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
   const parseAddresses = (text) => {
     const parts = String(text || '')
       .split(/[\s,;\n\r]+/)
@@ -143,7 +133,7 @@
     for (const addr of parts) {
       let key = null;
       if (isEvm(addr)) key = addr.toLowerCase();
-      else if (isSol(addr)) continue; // SIM is EVM here
+      else if (isSol(addr)) continue;
       else continue;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -152,9 +142,8 @@
     return out;
   };
 
-  // Simple exact median (over existing values only; mirrors approx_percentile logic closely enough)
   function median(values) {
-    if (!values || values.length === 0) return null; // -> SQL approx_percentile would be NULL
+    if (!values || values.length === 0) return null;
     const arr = values.slice().sort((a,b)=>a-b);
     const n = arr.length;
     const mid = Math.floor(n/2);
@@ -162,11 +151,8 @@
     return (arr[mid-1] + arr[mid]) / 2;
   }
 
-  // Build the hour_map the same way the SQL does:
-  // localHour = (utc_hour + offset + 24) % 24
-  // in_high: local 10..15 inclusive; in_low: local 1..5 inclusive
   function buildHourMap() {
-    const map = new Map(); // key: offset -> { high: Set<h>, low: Set<h> } in terms of *UTC hours*
+    const map = new Map();
     for (let offset=-12; offset<=14; offset++) {
       const high = new Set();
       const low  = new Set();
@@ -181,30 +167,23 @@
   }
   const HOUR_MAP = buildHourMap();
 
-  /* =======================
-     SIM: Transactions fetch (ALL chains)
-     - We page until no next_offset or cap reached
-     - We only need block_time → UTC hour
-  ======================= */
   async function fetchTxHoursForAddress(address, cap=3000) {
     let offset = null;
     let fetched = 0;
-    const counts = new Map(); // utc_hour -> tx_count (only hours that occur will exist)
+    const counts = new Map();
 
     while (true) {
       const q = new URL(`${SIM_PROXY}/evm/transactions/${address}`);
-      q.searchParams.set('limit', '500');          // per page
+      q.searchParams.set('limit', '500');
       if (offset) q.searchParams.set('offset', offset);
-      // NOTE: no chain_ids → include all supported chains (user requested no trimming)
 
       const r = await fetch(q.toString(), { headers: { 'Accept': 'application/json' } });
       if (!r.ok) throw new Error(`SIM /transactions HTTP ${r.status}`);
       const js = await r.json();
       const txs = Array.isArray(js.transactions) ? js.transactions : [];
       for (const t of txs) {
-        // block_time is ISO string in UTC ("...Z")
         const d = new Date(t.block_time);
-        const h = d.getUTCHours(); // <-- UTC hour only
+        const h = d.getUTCHours();
         counts.set(h, (counts.get(h) || 0) + 1);
       }
       fetched += txs.length;
@@ -212,34 +191,25 @@
       if (!offset || fetched >= cap || txs.length === 0) break;
     }
 
-    return counts; // e.g., Map { 0->5, 1->0 (missing), 2->8, ... only existing hours present }
+    return counts;
   }
 
-  /* =======================
-     SQL-IDENTICAL PREDICTOR
-     Inputs: Map(utc_hour -> tx_count)
-     Outputs: { offset, utc_label, iana_tz_example, passes_rule, med_10_15, med_1_5, ratio, bars_high_over_mult }
-  ======================= */
   function predictTimezoneFromCountsSQL(countMap) {
     let best = null;
 
     for (let offset=-12; offset<=14; offset++) {
       const { high, low } = HOUR_MAP.get(offset);
 
-      // Values ONLY for hours that exist (like SQL join to utc_hour_counts)
       const highVals = [];
       const lowVals  = [];
       for (const h of high) { if (countMap.has(h)) highVals.push(countMap.get(h)); }
       for (const h of low)  { if (countMap.has(h))  lowVals.push(countMap.get(h)); }
 
-      const med_10_15 = median(highVals); // NULL if none
-      const med_1_5   = median(lowVals);  // NULL if none
-
-      // ratio = med_10_15 / NULLIF(med_1_5, 0)
+      const med_10_15 = median(highVals);
+      const med_1_5   = median(lowVals);
       let ratio = null;
       if (med_1_5 !== null && med_1_5 !== 0) ratio = med_10_15 !== null ? (med_10_15 / med_1_5) : null;
 
-      // bars_high_over_mult: count of hours IN HIGH where a row exists AND u.tx_count >= MULT * med_1_5
       let bars_high_over_mult = 0;
       if (med_1_5 !== null && med_1_5 !== 0) {
         const thresh = MULT * med_1_5;
@@ -249,38 +219,27 @@
         }
       }
 
-      // passes_rule = (med_1_5 > 0 AND med_10_15 >= MULT * med_1_5)
       const passes_rule = (med_1_5 !== null && med_1_5 > 0) &&
                           (med_10_15 !== null && med_10_15 >= MULT * med_1_5);
 
-      const row = {
-        offset,
-        med_10_15,
-        med_1_5,
-        ratio, // may be null
-        bars_high_over_mult,
-        passes_rule
-      };
+      const row = { offset, med_10_15, med_1_5, ratio, bars_high_over_mult, passes_rule };
 
-      // best: ORDER BY ratio DESC NULLS LAST, bars_high_over_mult DESC
-      // implement: first prefer non-null ratio; higher is better; tie → higher bars
       const better = (() => {
         if (!best) return true;
         const a = row, b = best;
         if (a.ratio === null && b.ratio === null) {
-          // both null → tie-break on bars
           if (a.bars_high_over_mult !== b.bars_high_over_mult) {
             return a.bars_high_over_mult > b.bars_high_over_mult;
           }
-          return false; // keep first
+          return false;
         }
-        if (a.ratio === null) return false;     // nulls last
+        if (a.ratio === null) return false;
         if (b.ratio === null) return true;
         if (a.ratio !== b.ratio) return a.ratio > b.ratio;
         if (a.bars_high_over_mult !== b.bars_high_over_mult) {
           return a.bars_high_over_mult > b.bars_high_over_mult;
         }
-        return false; // keep first
+        return false;
       })();
 
       if (better) best = row;
@@ -299,32 +258,32 @@
     };
   }
 
-  /* =======================
-     UI COMPONENT
-  ======================= */
   function App() {
     const mapEl = useRef(null);
     const mapRef = useRef(null);
     const tzLayerRef = useRef(null);
 
-    const [selectedZones, setSelectedZones] = useState([]); // array of UI labels ("UTC - 3")
+    const [selectedZones, setSelectedZones] = useState([]);
     const selectedZonesRef = useRef(selectedZones);
     useEffect(() => { selectedZonesRef.current = selectedZones; }, [selectedZones]);
 
     const [addresses, setAddresses] = useState([]);
     const [addressInput, setAddressInput] = useState('');
-    const [rows, setRows] = useState([]);
     const [status, setStatus] = useState('');
     const [loading, setLoading] = useState(false);
     const [detecting, setDetecting] = useState(false);
     const [detectError, setDetectError] = useState('');
+
+    // map of zone -> addresses (for group counts & chips)
     const [zoneAddresses, setZoneAddresses] = useState({});
     const zoneAddressesRef = useRef(zoneAddresses);
     useEffect(()=>{ zoneAddressesRef.current = zoneAddresses; }, [zoneAddresses]);
 
+    // NEW: per-address results for the results table
+    const [results, setResults] = useState([]);
+
     const [geoData, setGeoData] = useState(FALLBACK_FC);
 
-    // external loaders
     const loadScript = (src) => new Promise((resolve,reject)=>{
       const existing = document.querySelector(`script[src="${src}"]`);
       if (existing) {
@@ -346,9 +305,7 @@
       l.onload = resolve; l.onerror = reject; document.head.appendChild(l);
     });
 
-    // map init
     useEffect(() => {
-      let cancelled = false;
       (async () => {
         try {
           await loadCSS('https://unpkg.com/leaflet@1.9.4/dist/leaflet.css');
@@ -376,10 +333,8 @@
         }
       })();
       return () => { try { mapRef.current?.remove(); } catch {} };
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // style polygons when selection changes
     useEffect(() => {
       if (!tzLayerRef.current) return;
       try {
@@ -399,8 +354,7 @@
       } catch {}
     }, [selectedZones]);
 
-    // re-render when geoData changes
-    useEffect(() => { if (mapRef.current) renderZones(); /* eslint-disable-line */ }, [geoData]);
+    useEffect(() => { if (mapRef.current) renderZones(); }, [geoData]);
 
     async function loadZones() {
       setLoading(true);
@@ -449,13 +403,6 @@
         layer.on('click', () => {
           setSelectedZones((prev) => {
             const already = prev.includes(label);
-            setRows((prevRows) => {
-              const idx = prevRows.findIndex(r => r.zone === label);
-              if (idx === 0) return prevRows.slice(1);
-              if (idx > 0)  return [...prevRows.slice(0, idx), ...prevRows.slice(idx + 1)];
-              const ts = new Date().toISOString();
-              return [{ ts, zone: label, source: 'map', address_count: zoneAddressesRef.current[label]?.length || 0, sample: (zoneAddressesRef.current[label]||[]).join(' | ') }, ...prevRows];
-            });
             return already ? prev.filter((z)=>z!==label) : [label, ...prev];
           });
           try { if (layer.getBounds) mapRef.current.fitBounds(layer.getBounds(), { padding: [20,20] }); } catch {}
@@ -471,26 +418,26 @@
       setDetectError('');
       try {
         const zoneMap = {};
+        const perAddress = [];
+
         for (const addr of addrList) {
-          const counts = await fetchTxHoursForAddress(addr, 4000); // pull a good sample
+          const counts = await fetchTxHoursForAddress(addr, 4000);
           const res = predictTimezoneFromCountsSQL(counts);
-          const label = res.utc_label; // "UTC - 3", "UTC + 8", "UTC ± 0"
+          const label = res.utc_label; // "UTC - 3", etc.
           (zoneMap[label] = zoneMap[label] || []).push(addr);
+          perAddress.push({
+            address: addr,
+            utc_label: res.utc_label,
+            iana: res.iana_tz_example
+          });
         }
+
         const zones = Object.keys(zoneMap);
         if (!zones.length) throw new Error('No timezone returned');
 
-        // update UI
-        setZoneAddresses(zoneMap);
-        setSelectedZones(zones);
-        setRows(() => {
-          let out = [];
-          for (const z of zones) {
-            const ts = new Date().toISOString();
-            out = [{ ts, zone: z, source: 'sim', address_count: zoneMap[z].length, sample: zoneMap[z].join(' | ') }, ...out];
-          }
-          return out;
-        });
+        setZoneAddresses(zoneMap);        // for group counts & chips
+        setSelectedZones(zones);          // color polygons
+        setResults(perAddress);           // NEW: per-address table
       } catch (err) {
         console.error(err);
         setDetectError(err.message || 'Timezone detection failed');
@@ -503,6 +450,9 @@
       const parsed = parseAddresses(addressInput);
       setAddresses(parsed);
     };
+
+    // helper to get group count per row
+    const groupCount = (label) => (zoneAddresses[label] || []).length || 0;
 
     return (
       <div style={{ maxWidth: 1100, margin: '0 auto', padding: 16, fontFamily: 'Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial', color: '#e8ecff' }}>
@@ -529,6 +479,7 @@
           .table { width: 100%; border-collapse: collapse; font-size: 13px; color: var(--text); }
           .th, .td { padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,.08); }
           .thead { position: sticky; top: 0; background: #0f1424; z-index: 1; }
+          .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
         `}</style>
 
         <div className="fancy-bg" />
@@ -541,7 +492,7 @@
           </span>
         </h1>
         <p style={{ marginTop: 6, color: '#c7d0ff', opacity: .85 }}>
-          Paste addresses, click a zone to log it. Detection uses Dune SIM transactions and matches your SQL (median windows 10–15 vs 1–5, mult=5).
+          Paste addresses, click a zone to color. “Count” shows how many addresses share that timezone.
         </p>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1.45fr .55fr', gap: 16, marginTop: 14 }}>
@@ -560,12 +511,6 @@
                     {z}
                     <button title="Remove" onClick={() => {
                       setSelectedZones(prev => prev.filter(p => p !== z));
-                      setRows(prev => {
-                        const idx = prev.findIndex(r=>r.zone===z);
-                        if (idx === 0) return prev.slice(1);
-                        if (idx > 0) return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
-                        return prev;
-                      });
                     }}>×</button>
                   </span>
                 ))}
@@ -595,30 +540,28 @@
           </div>
         </div>
 
-        {/* Click log */}
+        {/* Results (per address) */}
         <div className="card" style={{ marginTop: 18, padding: 12 }}>
-          <div style={{ fontWeight: 700, marginBottom: 8, color: '#c9d2ff' }}>Clicks</div>
+          <div style={{ fontWeight: 700, marginBottom: 8, color: '#c9d2ff' }}>Results</div>
           <div style={{ overflowX: 'auto' }}>
             <table className="table">
               <thead>
                 <tr className="thead">
-                  <th className="th">Timestamp</th>
+                  <th className="th">Address</th>
                   <th className="th">Timezone</th>
-                  <th className="th">Source</th>
-                  <th className="th">Address Count</th>
-                  <th className="th">Addresses</th>
+                  <th className="th">Timezone Name</th>
+                  <th className="th">Count</th>
                 </tr>
               </thead>
               <tbody>
-              {rows.length === 0 ? (
-                <tr><td colSpan={5} style={{ padding: 12, opacity: 0.7 }}>No clicks yet. Paste addresses, then click a timezone.</td></tr>
-              ) : rows.map((row, idx) => (
-                <tr key={row.ts + idx} style={{ borderBottom: '1px solid rgba(255,255,255,.06)' }}>
-                  <td className="td">{row.ts}</td>
-                  <td className="td">{row.zone}</td>
-                  <td className="td">{row.source}</td>
-                  <td className="td">{row.address_count}</td>
-                  <td className="td">{row.sample}</td>
+              {results.length === 0 ? (
+                <tr><td colSpan={4} style={{ padding: 12, opacity: 0.7 }}>No results yet. Paste addresses, then click Run.</td></tr>
+              ) : results.map((r, i) => (
+                <tr key={r.address + i} style={{ borderBottom: '1px solid rgba(255,255,255,.06)' }}>
+                  <td className="td mono">{r.address}</td>
+                  <td className="td">{r.utc_label}</td>
+                  <td className="td">{r.iana}</td>
+                  <td className="td">{groupCount(r.utc_label)}</td>
                 </tr>
               ))}
               </tbody>
