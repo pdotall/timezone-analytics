@@ -100,53 +100,63 @@
         return counts;
       }
 
-      function scoreOffsetsExactlyLikeSQL(counts){
-        const mult = 5.0;
-        const HOURS = [...Array(24).keys()];
-        const OFFSETS = Array.from({length:27},(_,i)=>i-12);
+      function scoreOffsetsExactlyLikeSQL(counts) {
+  // counts: length-24 array of UTC hour counts (0..23)
+  const mult = 5.0;                            // params.mult
+  const HOURS = [...Array(24).keys()];
+  const OFFSETS = Array.from({ length: 27 }, (_, i) => i - 12); // -12..14 inclusive
 
-        function median(vals){
-          if(!vals.length) return 0;
-          const s=vals.slice().sort((a,b)=>a-b);
-          const mid=Math.floor(s.length/2);
-          return s.length%2? s[mid] : (s[mid-1]+s[mid])/2;
-        }
-        function inHigh(local){ return local>=10 && local<=15; }
-        function inLow(local){  return local>= 1 && local<= 5; }
+  function median(vals) {
+    if (!vals || !vals.length) return 0;
+    const s = vals.slice().sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  }
+  const inHigh = (local) => local >= 10 && local <= 15; // 10–15 inclusive
+  const inLow  = (local) => local >=  1 && local <=  5; // 1–5 inclusive
 
-        const rows=[];
-        for(const offset of OFFSETS){
-          const localFromUTC = (h)=> (h + offset + 24) % 24;
+  const rows = [];
+  for (const offset of OFFSETS) {
+    const localFromUTC = (h) => (h + offset + 24) % 24;
 
-          const highs=[]; const lows=[];
-          for(const utcH of HOURS){
-            const local = localFromUTC(utcH);
-            if(inHigh(local)) highs.push(counts[utcH]);
-            if(inLow(local))  lows.push(counts[utcH]);
-          }
-          const med_10_15 = median(highs);
-          const med_1_5   = median(lows);
+    // meds CTE
+    const highs = [];
+    const lows  = [];
+    for (const utcH of HOURS) {
+      const local = localFromUTC(utcH);
+      if (inHigh(local)) highs.push(counts[utcH]);
+      if (inLow(local))  lows.push(counts[utcH]);
+    }
+    const med_10_15 = median(highs);           // approx_percentile(..., 0.5) FILTER (in_high)
+    const med_1_5   = median(lows);            // approx_percentile(..., 0.5) FILTER (in_low)
 
-          let bars_high_over_mult = 0;
-          for(const utcH of HOURS){
-            const local = localFromUTC(utcH);
-            if(inHigh(local) && counts[utcH] >= mult * (med_1_5||0)) bars_high_over_mult++;
-          }
-          const ratio = med_1_5===0 ? null : (med_10_15 / med_1_5);
-          const passes_rule = (med_1_5>0) && (med_10_15 >= mult * med_1_5);
-
-          rows.push({offset, med_10_15, med_1_5, ratio, bars_high_over_mult, passes_rule});
-        }
-
-        rows.sort((a,b)=>{
-          const ar = (a.ratio==null?-Infinity:a.ratio);
-          const br = (b.ratio==null?-Infinity:b.ratio);
-          if(br!==ar) return br-ar;
-          return (b.bars_high_over_mult)-(a.bars_high_over_mult);
-        });
-
-        return rows[0];
+    // bars_over_mult CTE
+    let bars_high_over_mult = 0;
+    for (const utcH of HOURS) {
+      const local = localFromUTC(utcH);
+      if (inHigh(local) && counts[utcH] >= mult * (med_1_5 || 0)) {
+        bars_high_over_mult += 1;
       }
+    }
+
+    // scored CTE
+    const ratio = med_1_5 === 0 ? null : (med_10_15 / med_1_5);
+    const passes_rule = (med_1_5 > 0) && (med_10_15 >= mult * med_1_5);
+
+    rows.push({ offset, med_10_15, med_1_5, ratio, bars_high_over_mult, passes_rule });
+  }
+
+  // best CTE: ORDER BY ratio DESC NULLS LAST, bars_high_over_mult DESC
+  rows.sort((a, b) => {
+    const ar = (a.ratio == null ? Number.NEGATIVE_INFINITY : a.ratio);
+    const br = (b.ratio == null ? Number.NEGATIVE_INFINITY : b.ratio);
+    if (br !== ar) return br - ar;
+    return (b.bars_high_over_mult - a.bars_high_over_mult);
+  });
+
+  return rows[0]; // winner
+}
+
 
       function utcLabelFromOffset(off){
         if(off<0) return `UTC - ${Math.abs(off)}`;
