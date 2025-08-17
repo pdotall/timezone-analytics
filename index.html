@@ -100,6 +100,28 @@
     }
     .toggle-btn:hover{border-color:var(--accent)}
     .toggle-ico{width:18px;height:18px;display:block}
+
+    /* Modal (glassy) */
+    .modal-backdrop{
+      position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+      background:color-mix(in oklab, black 30%, transparent); /* supported modern browsers */
+      backdrop-filter: blur(10px) saturate(120%);
+      -webkit-backdrop-filter: blur(10px) saturate(120%);
+      z-index:999;
+    }
+    .modal-card{
+      width:min(520px,92vw);
+      border:1px solid var(--border);
+      border-radius:16px;
+      padding:16px;
+      background:linear-gradient(180deg, color-mix(in oklab, var(--panel) 86%, transparent), color-mix(in oklab, var(--panel-2) 86%, transparent));
+      box-shadow:0 30px 80px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05);
+      color:var(--text);
+    }
+    .modal-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-weight:800}
+    .modal-b{font-size:14px;color:var(--text-2)}
+    .modal-f{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+
     @media (max-width: 980px){
       .grid{grid-template-columns:1fr;gap:12px}
       #map{height:460px}
@@ -121,6 +143,7 @@
   const NE_TOPO_URL =
     'https://gist.githubusercontent.com/tschaub/cc70281ce4df5358eac38b34409b9ef9/raw/d152ba9e83d7733d9fb5f37f52202c0fcead834a/timezones.json';
   const MULT = 5.0;
+  const PRICE_PER_ADDRESS = 0.5;
 
   const IANA_EXAMPLE = new Map([
     [-12,'Etc/GMT+12'],[-11,'Pacific/Pago_Pago'],[-10,'Pacific/Honolulu'],[-9,'America/Anchorage'],
@@ -224,15 +247,14 @@
     return `hsl(${hue} ${sat}% ${l}%)`;
   }
 
-  /* ======= CRITICAL: fetch across all chains & full history, send+receive only ======= */
+  /* ======= Fetch across all chains & full history, send+receive only ======= */
   async function fetchTxHoursForAddress(address){
     let cursor=null;
     const buckets = new Array(24).fill(0);
-    // Remove hard caps; iterate until there is no next_offset
     while(true){
       const url = new URL(`${SIM_PROXY}/evm/activity/${address}`);
-      url.searchParams.set('type','send,receive'); // match SQL: from/to
-      url.searchParams.set('limit','1000');        // SIM pages
+      url.searchParams.set('type','send,receive');
+      url.searchParams.set('limit','1000');
       if(cursor) url.searchParams.set('offset', cursor);
 
       const r = await fetch(url.toString(),{headers:{'Accept':'application/json'}});
@@ -240,19 +262,17 @@
       const js = await r.json();
       const acts = Array.isArray(js.activity) ? js.activity : [];
       for(const ev of acts){
-        const h = new Date(ev.block_time).getUTCHours(); // UTC only
+        const h = new Date(ev.block_time).getUTCHours();
         buckets[h] += 1;
       }
       cursor = js.next_offset || null;
       if(!cursor || acts.length===0) break;
     }
-    // Convert to Map like your working version
     const m = new Map();
     for(let h=0; h<24; h++) if (buckets[h] > 0) m.set(h, buckets[h]);
     return m;
   }
 
-  // SQL-identical predictor (unchanged from your working version)
   function predictTimezoneFromCountsSQL(countMap){
     let best=null;
     for(let ofs=-12; ofs<=14; ofs++){
@@ -305,7 +325,6 @@
     };
   }
 
-  /* ======================= SVG ICONS ======================= */
   const SunIcon = ({className}) => (
     <svg className={className||'toggle-ico'} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
       <circle cx="12" cy="12" r="4"/>
@@ -318,10 +337,10 @@
     </svg>
   );
 
-  /* ======================= APP ======================= */
   function App(){
     const [theme,setTheme]=useState(()=>{
-      const t=localStorage.getItem('ithil-theme'); return t==='sun'?'sun':'moon';
+      const t=localStorage.getItem('ithil-theme');
+      return t ? t : 'sun';  /* sun default */
     });
     useEffect(()=>{ document.body.setAttribute('data-theme', theme==='sun'?'sun':'moon'); localStorage.setItem('ithil-theme',theme); },[theme]);
 
@@ -342,6 +361,11 @@
 
     const [results,setResults]=useState([]);
     const [geoData,setGeoData]=useState(FALLBACK_FC);
+
+    /* modal state */
+    const [showModal,setShowModal]=useState(false);
+    const parsedCount = parseAddresses(addressInput).length;
+    const priceTotal = (parsedCount * PRICE_PER_ADDRESS).toFixed(2);
 
     const loadScript=(src)=>new Promise((res,rej)=>{
       const ex=document.querySelector(`script[src="${src}"]`);
@@ -428,7 +452,17 @@
       finally{ setDetecting(false); }
     }
 
-    const parseNow=()=> setAddresses(parseAddresses(addressInput));
+    const openConfirm = () => {
+      const parsed = parseAddresses(addressInput);
+      setAddresses(parsed);
+      if(parsed.length === 0) return;
+      setShowModal(true);
+    };
+    const approveAndRun = async () => {
+      setShowModal(false);
+      await handleDetect();
+    };
+
     const countByLabel=(label)=> (zoneAddresses[label]||[]).length||0;
 
     function toCSV(rows){
@@ -500,10 +534,11 @@
               <textarea className="input" value={addressInput} onChange={e=>setAddressInput(e.target.value)}
                         placeholder="0xabc...\n0xdef...\n0x123..." />
               <div className="controls" style={{marginTop:'10px'}}>
-                <button className="btn" onClick={parseNow} disabled={detecting}>Parse</button>
-                <button className="btn primary" onClick={handleDetect} disabled={!addresses.length || detecting}>Run</button>
-                <button className="btn ghost" onClick={downloadCSV} disabled={!results.length}>CSV</button>
-                <span className="muted">{detecting ? 'Detecting timezones…' : `${addresses.length} valid`}</span>
+                <button className="btn primary" onClick={openConfirm} disabled={parsedCount===0 || detecting}>Confirm</button>
+                <button className="btn ghost" onClick={downloadCSV} disabled={!results.length}>Download CSV</button>
+                <span className="muted">
+                  {detecting ? 'Detecting timezones…' : `${parsedCount} address${parsedCount===1?'':'es'} ready`}
+                </span>
                 {detectError && <span style={{color:'var(--danger)',fontSize:'12px'}}>{detectError}</span>}
               </div>
             </div>
@@ -524,7 +559,7 @@
               </thead>
               <tbody>
               {results.length===0 ? (
-                <tr><td colSpan="4" className="muted" style={{padding:'10px'}}>Paste addresses and click Run.</td></tr>
+                <tr><td colSpan="4" className="muted" style={{padding:'10px'}}>Paste addresses and click Confirm.</td></tr>
               ) : (
                 results.map((r,i)=>(
                   <tr key={r.address+i}>
@@ -543,6 +578,32 @@
         <div className="muted" style={{fontSize:'12px',marginTop:'10px'}}>
           Natural Earth time zones (TopoJSON). EVM activity via SIM (all chains, send+receive). © OSM contributors.
         </div>
+
+        {showModal && (
+          <div className="modal-backdrop" role="dialog" aria-modal="true">
+            <div className="modal-card">
+              <div className="modal-h">
+                <div>Confirm Detection</div>
+                <button className="btn ghost" onClick={()=>setShowModal(false)}>×</button>
+              </div>
+              <div className="modal-b">
+                <div style={{marginBottom:'8px'}}>We will analyze <strong>{parsedCount}</strong> address{parsedCount===1?'':'es'}.</div>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'6px'}}>
+                  <div className="muted">Price</div>
+                  <div>$0.50 / address</div>
+                </div>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'6px',fontWeight:800}}>
+                  <div>Total</div>
+                  <div>${priceTotal}</div>
+                </div>
+              </div>
+              <div className="modal-f">
+                <button className="btn" onClick={()=>setShowModal(false)}>Cancel</button>
+                <button className="btn primary" onClick={approveAndRun} disabled={detecting}>Approve & Run</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
