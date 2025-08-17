@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Interactive UTC timezones with real polygons, Dune SIM-based UTC prediction."
+      content="Interactive UTC timezones with real polygons, Dune SIM-based UTC prediction (SQL-identical)."
     />
     <style>
       html, body { margin: 0; height: 100%; background: #0b1020; }
@@ -200,7 +200,7 @@
         if (!Array.isArray(counts24) || counts24.length !== 24) return null;
         let best = null;
 
-        // Build list of hours that have tx (u rows in SQL). No zeros included.
+        // Only hours that exist in utc_hour_counts (exclude zeros)
         const presentUTC = [];
         for (let utc = 0; utc < 24; utc++) {
           if ((counts24[utc] || 0) > 0) presentUTC.push(utc);
@@ -219,13 +219,13 @@
           const med_10_15 = medianOrNull(highVals);
           const med_1_5   = medianOrNull(lowVals);
 
-          // ratio: NULL if med_1_5 is 0 or null (SQL: med_10_15 / NULLIF(med_1_5, 0))
+          // ratio: NULL if med_1_5 is 0 or null
           let ratio = null;
           if (med_1_5 !== null && med_1_5 !== 0) {
             ratio = (med_10_15 ?? 0) / med_1_5;
           }
 
-          // bars_high_over_mult: only count if threshold is valid number
+          // bars_high_over_mult: count of highVals >= mult * med_1_5 (only if med_1_5 not null)
           let bars_high_over_mult = 0;
           const threshold = (med_1_5 !== null) ? mult * med_1_5 : null;
           if (threshold !== null && Number.isFinite(threshold)) {
@@ -234,7 +234,7 @@
             }
           }
 
-          // passes_rule: (med_1_5 > 0 AND med_10_15 >= mult*med_1_5)
+          // passes_rule: (med_1_5 > 0 AND med_10_15 >= mult * med_1_5)
           const passes_rule =
             (med_1_5 !== null && med_1_5 > 0) &&
             (med_10_15 !== null && med_10_15 >= mult * med_1_5);
@@ -267,23 +267,32 @@
       }
 
       /* ==============================
-         SIM FETCH (ALL CHAINS)
+         SIM FETCH (ALL CHAINS) — TX-LEVEL COUNTS (DEDUP BY tx_hash!)
       ============================== */
       async function fetchAddressHourlyCounts(address) {
         // No chain_ids → include all chains; widen limit; ascending time
+        // We will dedupe by tx_hash per hour to match evms.transactions counting logic.
         const url =
           `${SIM_BASE}/evm/activity/${address}`
-          + `?type=send,receive,mint,burn&sort_by=block_time&sort_order=asc&limit=2000`;
+          + `?type=send,receive,mint,burn&sort_by=block_time&sort_order=asc&limit=5000`;
         const r = await fetch(url);
         if (!r.ok) throw new Error(`SIM HTTP ${r.status}`);
         const { activity = [] } = await r.json();
-        const counts = new Array(24).fill(0);
+
+        // Build hour -> Set<tx_hash>
+        const hourTxSet = Array.from({ length: 24 }, () => new Set());
         for (const ev of activity) {
-          // We are mimicking evms.transactions "from"/"to" aggregation at tx level;
-          // SIM activity is coarser but we at least bucket block_time into UTC hours:
+          // Skip if tx_hash missing (very rare)
+          const txh = ev.tx_hash || ev.transaction_hash || null;
+          if (!txh) continue;
+
+          // bucket by UTC hour of the transaction time
           const h = utcHourFromISO(ev.block_time);
-          counts[h] += 1;
+          hourTxSet[h].add(txh);
         }
+
+        // Convert to counts
+        const counts = hourTxSet.map((s) => s.size);
         return counts;
       }
 
@@ -466,7 +475,7 @@
           try {
             const results = [];
             for (const address of addrList) {
-              const counts = await fetchAddressHourlyCounts(address);
+              const counts = await fetchAddressHourlyCounts(address); // dedup by tx_hash
               const scored = scoreBestOffset(counts, 5.0); // params.mult = 5.0
               if (!scored) continue;
               results.push({
@@ -559,7 +568,7 @@
               .textarea { width: 100%; height: 140px; background: #081225; color: var(--text); border: 1px solid var(--stroke); border-radius: 12px; padding: 12px; }
               .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; border: 1px solid var(--stroke); background: rgba(255,255,255,.05); font-size:12px; }
               .pill button { background: transparent; border: 0; color: #ffffffcc; cursor: pointer; border-radius: 999px; padding: 0 6px; }
-              .table { width: 100%; border-collapse: collapse; font-size: 13px; color: var(--text); }
+              .table { width: 100%; border-collapse: collapse; font-size: 13px; color: #e8ecff; }
               .th, .td { padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,.08); }
               .thead { position: sticky; top: 0; background: #0f1424; z-index: 1; }
             `}</style>
@@ -632,7 +641,7 @@
                       <div><b>ratio:</b> {debugInfo.ratio == null ? 'NULL' : debugInfo.ratio.toFixed(3)}</div>
                       <div><b>bars_high_over_mult:</b> {debugInfo.bars_high_over_mult}</div>
                       <div style={{ marginTop: 6 }}>
-                        <b>Counts (UTC hours 0→23, only used if >0):</b><br />
+                        <b>Counts (UTC hours 0→23, counted once per tx_hash):</b><br />
                         {debugInfo.counts.map((v,i)=>`${i}:${v}`).join('  ')}
                       </div>
                     </div>
