@@ -102,22 +102,29 @@
     .toggle-ico{width:18px;height:18px;display:block}
 
     /* Modal (glassy) */
-    .modal-backdrop{
-      position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
-      background:color-mix(in oklab, black 30%, transparent); /* supported modern browsers */
-      backdrop-filter: blur(10px) saturate(120%);
-      -webkit-backdrop-filter: blur(10px) saturate(120%);
-      z-index:999;
-    }
-    .modal-card{
-      width:min(520px,92vw);
-      border:1px solid var(--border);
-      border-radius:16px;
-      padding:16px;
-      background:linear-gradient(180deg, color-mix(in oklab, var(--panel) 86%, transparent), color-mix(in oklab, var(--panel-2) 86%, transparent));
-      box-shadow:0 30px 80px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05);
-      color:var(--text);
-    }
+    .modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.35);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  z-index: 999;
+}
+
+.modal-card {
+  width: min(520px, 92vw);
+  border-radius: 16px;
+  padding: 18px;
+  border: 1px solid rgba(255,255,255,0.2);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 30px 80px rgba(0,0,0,0.45),
+              inset 0 1px 0 rgba(255,255,255,0.05);
+  color: var(--text);
+}
+
     .modal-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-weight:800}
     .modal-b{font-size:14px;color:var(--text-2)}
     .modal-f{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
