@@ -253,30 +253,38 @@
     return `hsl(${hue} ${sat}% ${l}%)`;
   }
 
-  async function fetchTxHoursForAddress(address){
-    let cursor=null;
-    const buckets = new Array(24).fill(0);
-    while(true){
-      const url = new URL(`${SIM_PROXY}/evm/activity/${address}`);
-      url.searchParams.set('type','send,receive');
-      url.searchParams.set('limit','1000');
-      if(cursor) url.searchParams.set('offset', cursor);
+// SQL-identical: count wallet activity hours (send + receive) across all chains
+async function fetchTxHoursForAddress(address, cap = 10000) {
+  let cursor = null;
+  let fetched = 0;
+  const buckets = new Array(24).fill(0);
 
-      const r = await fetch(url.toString(),{headers:{'Accept':'application/json'}});
-      if(!r.ok) throw new Error(`SIM /activity HTTP ${r.status}`);
-      const js = await r.json();
-      const acts = Array.isArray(js.activity) ? js.activity : [];
-      for(const ev of acts){
-        const h = new Date(ev.block_time).getUTCHours();
-        buckets[h] += 1;
-      }
-      cursor = js.next_offset || null;
-      if(!cursor || acts.length===0) break;
+  while (true) {
+    const url = new URL(`${SIM_PROXY}/evm/activity/${address}`);
+    url.searchParams.set('type', 'send,receive');  // only send/receive (both directions)
+    url.searchParams.set('limit', '1000');         // page size
+    if (cursor) url.searchParams.set('offset', cursor);
+
+    const r = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+    if (!r.ok) throw new Error(`SIM /activity HTTP ${r.status}`);
+    const js = await r.json();
+    const activity = Array.isArray(js.activity) ? js.activity : [];
+
+    for (const ev of activity) {
+      const h = new Date(ev.block_time).getUTCHours();  // always UTC
+      buckets[h] += 1;
     }
-    const m = new Map();
-    for(let h=0; h<24; h++) if (buckets[h] > 0) m.set(h, buckets[h]);
-    return m;
+
+    fetched += activity.length;
+    cursor = js.next_offset || null;
+    if (!cursor || activity.length === 0 || fetched >= cap) break;
   }
+
+  // return a sparse map like the SQL groups (only hours with >0)
+  const m = new Map();
+  for (let h = 0; h < 24; h++) if (buckets[h] > 0) m.set(h, buckets[h]);
+  return m;
+}
 
   function predictTimezoneFromCountsSQL(countMap){
     let best=null;
