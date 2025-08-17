@@ -128,7 +128,6 @@
     .modal-row-label{color:var(--muted)}
     .modal-row-value{font-weight:700;color:var(--text)}
     .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
-    /* push Leaflet controls behind when modal is open */
     body.modal-open .leaflet-control-container{z-index:0!important}
 
     @media (max-width: 980px){
@@ -147,7 +146,6 @@
 <script type="text/babel">
   const { useEffect, useRef, useState } = React;
 
-  /* ======================= DATA CONFIG ======================= */
   const SIM_PROXY = 'https://smart-money.pdotcapital.workers.dev/v1';
   const NE_TOPO_URL =
     'https://gist.githubusercontent.com/tschaub/cc70281ce4df5358eac38b34409b9ef9/raw/d152ba9e83d7733d9fb5f37f52202c0fcead834a/timezones.json';
@@ -164,7 +162,6 @@
     [12,'Pacific/Auckland'],[13,'Pacific/Tongatapu'],[14,'Pacific/Kiritimati']
   ]);
 
-  /* ======================= HELPERS ======================= */
   const getZoneName = (props = {}) =>
     props.tzid || props.TZID || props.time_zone || props.NAME || props.name || 'Timezone';
 
@@ -256,7 +253,6 @@
     return `hsl(${hue} ${sat}% ${l}%)`;
   }
 
-  /* ======= Fetch across all chains & full history, send+receive only ======= */
   async function fetchTxHoursForAddress(address){
     let cursor=null;
     const buckets = new Array(24).fill(0);
@@ -349,7 +345,7 @@
   function App(){
     const [theme,setTheme]=useState(()=>{
       const t=localStorage.getItem('ithil-theme');
-      return t ? t : 'sun';  /* sun default */
+      return t ? t : 'sun';
     });
     useEffect(()=>{ document.body.setAttribute('data-theme', theme==='sun'?'sun':'moon'); localStorage.setItem('ithil-theme',theme); },[theme]);
 
@@ -371,12 +367,10 @@
     const [results,setResults]=useState([]);
     const [geoData,setGeoData]=useState(FALLBACK_FC);
 
-    /* modal state */
     const [showModal,setShowModal]=useState(false);
     const parsedCount = parseAddresses(addressInput).length;
     const priceTotal = (parsedCount * PRICE_PER_ADDRESS).toFixed(2);
 
-    /* lower Leaflet controls while modal is open */
     useEffect(()=>{
       document.body.classList.toggle('modal-open', showModal);
       return ()=> document.body.classList.remove('modal-open');
@@ -512,13 +506,13 @@
             </div>
           </div>
 
-          <div className="theme-toggle">
-            <button className="toggle-btn" onClick={()=>setTheme(t=>t==='sun'?'moon':'sun')}>
-              {theme==='sun' ? <MoonIcon/> : <SunIcon/>}
-              <span>{theme==='sun' ? 'Moon' : 'Sun'}</span>
-            </button>
-            <div className="status">{loading ? 'Loading time zones…' : (detecting ? 'Detecting…' : 'Ready')}</div>
-          </div>
+        <div className="theme-toggle">
+          <button className="toggle-btn" onClick={()=>setTheme(t=>t==='sun'?'moon':'sun')}>
+            {theme==='sun' ? <MoonIcon/> : <SunIcon/>}
+            <span>{theme==='sun' ? 'Moon' : 'Sun'}</span>
+          </button>
+          <div className="status">{loading ? 'Loading time zones…' : (detecting ? 'Detecting…' : 'Ready')}</div>
+        </div>
         </div>
 
         <div className="grid">
@@ -602,7 +596,8 @@
             onClick={(e)=>{ if(e.target===e.currentTarget) setShowModal(false); }}
           >
             <div className="modal-card">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+              <!-- FIXED: style is now an object, not a string -->
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
                 <div className="modal-title">Confirm Detection</div>
                 <button className="btn" onClick={()=>setShowModal(false)} aria-label="Close">×</button>
               </div>
