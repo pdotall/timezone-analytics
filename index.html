@@ -101,33 +101,35 @@
     .toggle-btn:hover{border-color:var(--accent)}
     .toggle-ico{width:18px;height:18px;display:block}
 
-    /* Modal (glassy) */
+    /* ======= Glassy modal & backdrop (always above Leaflet) ======= */
     .modal-backdrop {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0,0,0,0.35);
-  backdrop-filter: blur(16px) saturate(180%);
-  -webkit-backdrop-filter: blur(16px) saturate(180%);
-  z-index: 999;
-}
-
-.modal-card {
-  width: min(520px, 92vw);
-  border-radius: 16px;
-  padding: 18px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 30px 80px rgba(0,0,0,0.45),
-              inset 0 1px 0 rgba(255,255,255,0.05);
-  color: var(--text);
-}
-
-    .modal-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-weight:800}
-    .modal-b{font-size:14px;color:var(--text-2)}
-    .modal-f{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: rgba(12, 15, 20, 0.45);
+      backdrop-filter: blur(18px) saturate(160%);
+      -webkit-backdrop-filter: blur(18px) saturate(160%);
+      z-index: 10000; /* above Leaflet controls */
+    }
+    .modal-card {
+      width: min(92vw, 520px);
+      border-radius: 16px;
+      padding: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      background: linear-gradient(145deg, rgba(255,255,255,.18), rgba(255,255,255,.08));
+      box-shadow:
+        0 30px 80px rgba(0, 0, 0, 0.45),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      color: var(--text);
+    }
+    .modal-title{font-weight:800;letter-spacing:.3px;font-size:16px;margin-bottom:6px}
+    .modal-rows{display:grid;grid-template-columns:1fr auto;row-gap:6px;column-gap:18px;align-items:center;margin-top:10px}
+    .modal-row-label{color:var(--muted)}
+    .modal-row-value{font-weight:700;color:var(--text)}
+    .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+    /* push Leaflet controls behind when modal is open */
+    body.modal-open .leaflet-control-container{z-index:0!important}
 
     @media (max-width: 980px){
       .grid{grid-template-columns:1fr;gap:12px}
@@ -374,6 +376,12 @@
     const parsedCount = parseAddresses(addressInput).length;
     const priceTotal = (parsedCount * PRICE_PER_ADDRESS).toFixed(2);
 
+    /* lower Leaflet controls while modal is open */
+    useEffect(()=>{
+      document.body.classList.toggle('modal-open', showModal);
+      return ()=> document.body.classList.remove('modal-open');
+    },[showModal]);
+
     const loadScript=(src)=>new Promise((res,rej)=>{
       const ex=document.querySelector(`script[src="${src}"]`);
       if(ex){ if(ex.dataset.loaded==='true') return res(); ex.addEventListener('load',()=>res()); ex.addEventListener('error',rej); return; }
@@ -587,26 +595,32 @@
         </div>
 
         {showModal && (
-          <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div
+            className="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e)=>{ if(e.target===e.currentTarget) setShowModal(false); }}
+          >
             <div className="modal-card">
-              <div className="modal-h">
-                <div>Confirm Detection</div>
-                <button className="btn ghost" onClick={()=>setShowModal(false)}>×</button>
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                <div className="modal-title">Confirm Detection</div>
+                <button className="btn" onClick={()=>setShowModal(false)} aria-label="Close">×</button>
               </div>
-              <div className="modal-b">
-                <div style={{marginBottom:'8px'}}>We will analyze <strong>{parsedCount}</strong> address{parsedCount===1?'':'es'}.</div>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'6px'}}>
-                  <div className="muted">Price</div>
-                  <div>$0.50 / address</div>
-                </div>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:'6px',fontWeight:800}}>
-                  <div>Total</div>
-                  <div>${priceTotal}</div>
-                </div>
+
+              <div className="modal-rows">
+                <div className="modal-row-label">We will analyze</div>
+                <div className="modal-row-value">{parsedCount} address{parsedCount===1?'':'es'}</div>
+
+                <div className="modal-row-label">Price</div>
+                <div className="modal-row-value">$0.50 / address</div>
+
+                <div className="modal-row-label">Total</div>
+                <div className="modal-row-value">${priceTotal}</div>
               </div>
-              <div className="modal-f">
+
+              <div className="modal-actions">
                 <button className="btn" onClick={()=>setShowModal(false)}>Cancel</button>
-                <button className="btn primary" onClick={approveAndRun} disabled={detecting}>Approve & Run</button>
+                <button className="btn primary" onClick={approveAndRun} disabled={detecting}>Approve &amp; Run</button>
               </div>
             </div>
           </div>
