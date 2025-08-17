@@ -596,7 +596,6 @@
             onClick={(e)=>{ if(e.target===e.currentTarget) setShowModal(false); }}
           >
             <div className="modal-card">
-              <!-- FIXED: style is now an object, not a string -->
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
                 <div className="modal-title">Confirm Detection</div>
                 <button className="btn" onClick={()=>setShowModal(false)} aria-label="Close">×</button>
